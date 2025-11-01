@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  master:
+    build: .
+    hostname: master
+    container_name: mini_hadoop_master
+    environment:
+      - NODE_TYPE=master
+      - COOKIE=mini_hadoop_secret_cookie
+      - MIX_ENV=dev
+    ports:
+      - "4000:4000"
+    networks:
+      mini_hadoop_network:
+        aliases:
+          - master.node
+    volumes:
+      - ./:/app
+    command: elixir --name master@master.node --cookie mini_hadoop_secret_cookie -S mix run --no-halt
+
+  slave1:
+    build: .
+    hostname: slave1
+    container_name: mini_hadoop_slave1
+    environment:
+      - NODE_TYPE=slave
+      - MASTER_NODE=master@master.node
+      - MIX_ENV=dev
+    networks:
+      mini_hadoop_network:
+        aliases:
+          - slave1.node
+    volumes:
+      - ./:/app
+      - slave1_data:/tmp/mini_hadoop_data
+    depends_on:
+      - master
+    command: sh -c "sleep 10 && elixir --name slave1@slave1.node --cookie mini_hadoop_secret_cookie -S mix run --no-halt"
+
+  slave2:
+    build: .
+    hostname: slave2
+    container_name: mini_hadoop_slave2
+    environment:
+      - NODE_TYPE=slave
+      - MASTER_NODE=master@master.node
+      - MIX_ENV=dev
+    networks:
+      mini_hadoop_network:
+        aliases:
+          - slave2.node
+    volumes:
+      - ./:/app
+      - slave2_data:/tmp/mini_hadoop_data
+    depends_on:
+      - master
+    command: sh -c "sleep 15 && elixir --name slave2@slave2.node --cookie mini_hadoop_secret_cookie -S mix run --no-halt"
+
+  slave3:
+    build: .
+    hostname: slave3
+    container_name: mini_hadoop_slave3
+    environment:
+      - NODE_TYPE=slave
+      - MASTER_NODE=master@master.node
+      - MIX_ENV=dev
+    networks:
+      mini_hadoop_network:
+        aliases:
+          - slave3.node
+    volumes:
+      - ./:/app
+      - slave3_data:/tmp/mini_hadoop_data
+    depends_on:
+      - master
+    command: sh -c "sleep 20 && elixir --name slave3@slave3.node --cookie mini_hadoop_secret_cookie -S mix run --no-halt"
+
+networks:
+  mini_hadoop_network:
+    driver: bridge
+
+volumes:
+  slave1_data:
+  slave2_data:
+  slave3_data:
