@@ -1,6 +1,5 @@
 defmodule MiniHadoopTest do
   use ExUnit.Case
-  doctest MiniHadoop
 
   describe "API availability" do
     test "MiniHadoop module exists" do

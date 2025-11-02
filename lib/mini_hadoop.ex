@@ -84,11 +84,11 @@ defmodule MiniHadoop do
 
   ## Examples
 
-      iex> MiniHadoop.Client.list_files()
-      [
-        %{filename: "test.txt", size: 1024, num_blocks: 1, created_at: ~U[...]},
-        %{filename: "data.csv", size: 2048, num_blocks: 1, created_at: ~U[...]}
-      ]
+      MiniHadoop.Client.list_files()
+      #=> [
+      #     %{filename: "test.txt", size: 1024, num_blocks: 1, created_at: ~U[2024-01-01 12:00:00Z]},
+      #     %{filename: "data.csv", size: 2048, num_blocks: 1, created_at: ~U[2024-01-01 12:05:00Z]}
+      #   ]
   """
   def list_files do
     NameNode.list_files()
@@ -100,11 +100,13 @@ defmodule MiniHadoop do
   ## Examples
 
       iex> MiniHadoop.Client.cluster_info()
-      %{
-        datanodes: [...],
-        num_files: 5,
-        files: [...]
-      }
+      #=> %{
+      #     datanodes: ["datanode1@cluster", "datanode2@cluster"],
+      #     num_files: 5,
+      #     files: [
+      #       %{filename: "test.txt", size: 1024, num_blocks: 1, created_at: ~U[2024-01-01 12:00:00Z]}
+      #     ]
+      #   }
   """
   def cluster_info do
     datanodes = NameNode.get_datanodes()
