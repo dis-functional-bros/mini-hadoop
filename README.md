@@ -1,88 +1,75 @@
 # MiniHadoop DFS
 
-Sebuah Distributed File System (DFS) yang terinspirasi dari Hadoop, dibangun dengan Elixir sebagai tugas mini project mata kuliah Pemrograman Fungsional.
+Sebuah Distributed File System (DFS) yang terinspirasi dari Hadoop, dikembangkan menggunakan Elixir sebagai bagian dari tugas mini project mata kuliah *Pemrograman Fungsional*.
 
 ## 🎯 Fitur Utama
 
-- **Distributed Storage**: File dipecah menjadi blocks dan didistribusikan ke multiple DataNodes
-- **Data Replication**: Setiap block direplikasi ke beberapa node untuk fault tolerance  
-- **Fault Tolerance**: Sistem tetap beroperasi bahkan jika beberapa DataNode gagal
-- **MapReduce Framework**: Distributed data processing dengan model MapReduce
-- **Functional Programming**: Menggunakan prinsip FP untuk reliability dan maintainability
+- **Distributed Storage**: Berkas (file) dipecah menjadi blok dan didistribusikan ke beberapa DataNode.
+- **Data Replication**: Setiap blok direplikasi ke sejumlah node untuk meningkatkan *fault tolerance*.
+- **Fault Tolerance**: Sistem tetap dapat beroperasi meskipun terjadi kegagalan pada beberapa DataNode.
+- **MapReduce Framework**: Mendukung pemrosesan data terdistribusi menggunakan model MapReduce.
+- **Functional Programming**: Memanfaatkan prinsip pemrograman fungsional untuk meningkatkan reliabilitas dan *maintainability*.
 
 ## 🏗️ Arsitektur Sistem
 
-### Master-Slave Architecture
-- **NameNode (Master)**: 
-  - Mengelola metadata file system
-  - Melacak lokasi blocks di seluruh DataNodes
-  - Mengoordinasi operasi file dan MapReduce jobs
-  
-- **DataNode + TaskTracker (Slaves)**: 
-  - Menyimpan data blocks di local storage
-  - Menjalankan MapReduce tasks
-  - Mengirim heartbeat ke NameNode
+### Model Master–Slave
+
+- **NameNode (Master)**:
+  - Mengelola metadata sistem berkas.
+  - Melacak lokasi setiap blok yang tersimpan pada DataNode.
+  - Mengoordinasikan operasi berkas dan tugas MapReduce.
+
+- **DataNode + TaskTracker (Slave)**:
+  - Menyimpan blok data pada penyimpanan lokal.
+  - Menjalankan tugas MapReduce.
+  - Mengirimkan *heartbeat* ke NameNode sebagai indikator status node.
 
 ### Komponen MapReduce
-- **JobTracker**: Mengelola job submission dan task scheduling
-- **TaskTracker**: Mengeksekusi map dan reduce tasks
-- **Pluggable Processing**: User-defined map dan reduce functions
 
-## 🚀 Quick Start
+- **JobTracker**: Mengelola pengajuan pekerjaan dan penjadwalan tugas.
+- **TaskTracker**: Mengeksekusi *map tasks* dan *reduce tasks*.
+- **Pluggable Processing**: Pengguna dapat mendefinisikan fungsi map dan reduce sendiri.
 
-### 1. Setup Environment
+## 🚀 Panduan Penggunaan
+
+### 1. Persiapan Lingkungan
 
 ```bash
-# Clone dan setup project
 git clone <repository>
 cd mini_hadoop
-
-# Install dependencies
 mix deps.get
 ```
 
-### 2. Menjalankan Cluster dengan Docker
+### 2. Menjalankan Cluster Menggunakan Docker
 
 ```bash
-# Build dan start cluster (1 master + 3 slaves)
 docker-compose up --build
-
-# Atau jalankan di background
 docker-compose up -d
 ```
 
-### 3. Testing Cluster
+### 3. Pengujian Cluster
 
 ```bash
-# Test operasi dasar
 docker exec -it mini_hadoop_master iex --name client@master --cookie mini_hadoop_secret_cookie
 ```
 
-## 📚 API Examples
+## 📚 Contoh Penggunaan API
 
-### Operasi File Dasar
+### Operasi Berkas Dasar
 
 ```elixir
-# Store file 
-MiniHadoop.Client.store_file("document.txt", "Content file")
-
-# Read file
+MiniHadoop.Client.store_file("document.txt", "Isi dokumen")
 {:ok, content} = MiniHadoop.Client.read_file("document.txt")
-
-# List semua file
 files = MiniHadoop.Client.list_files()
-
-# Delete file
 MiniHadoop.Client.delete_file("document.txt")
 ```
 
-### MapReduce Jobs
+### Pekerjaan MapReduce
 
 ```elixir
-# Submit MapReduce job
 job_spec = %{
   input_path: "/data/input",
-  output_path: "/data/output", 
+  output_path: "/data/output",
   map_function: &word_count_map/2,
   reduce_function: &word_count_reduce/3
 }
@@ -93,74 +80,56 @@ MiniHadoop.JobTracker.submit_job(job_spec)
 ### Monitoring Cluster
 
 ```elixir
-# Dapatkan informasi cluster
 info = MiniHadoop.Client.cluster_info()
 ```
 
 ## 🎓 Aspek Pemrograman Fungsional
 
-### 1. Immutable Data Structures
-State cluster bersifat immutable, memastikan konsistensi data across distributed nodes
+1. **Immutable Data Structures** — State cluster bersifat immutable untuk menjamin konsistensi.
+2. **Pattern Matching** — Digunakan untuk komunikasi terdistribusi yang lebih aman dan jelas.
+3. **Pure Functions** — Perilaku deterministik untuk penempatan blok dan partisi data.
+4. **Higher-Order Functions** — Mendukung fleksibilitas fungsi map dan reduce yang dapat didefinisikan pengguna.
+5. **Function Composition** — Alur data yang bersih dari penyimpanan → pemrosesan → keluaran.
+6. **Side Effect Management** — Pemisahan operasi I/O dari logika utama.
 
-### 2. Pattern Matching  
-Robust message handling untuk distributed communication dengan pattern matching
-
-### 3. Pure Functions
-Deterministic behavior untuk block placement dan data partitioning
-
-### 4. Higher-Order Functions
-Extensible MapReduce framework dengan pluggable processing functions
-
-### 5. Function Composition
-Clean data flow pipelines dari storage → processing → output
-
-### 6. Side Effect Management
-Isolasi I/O operations dan network calls dari business logic
-
-## 📁 Project Structure
+## 📁 Struktur Proyek
 
 ```
 mini_hadoop/
 ├── lib/
 │   ├── mini_hadoop/
-│   │   ├── client.ex                 # Main DFS API
-│   │   ├── application.ex            # Application supervisor
+│   │   ├── client.ex
+│   │   ├── application.ex
 │   │   ├── master/
-│   │   │   ├── name_node.ex          # Metadata management
-│   │   │   └── job_tracker.ex        # MapReduce job coordination
+│   │   │   ├── name_node.ex
+│   │   │   └── job_tracker.ex
 │   │   ├── slave/
-│   │   │   ├── data_node.ex          # Block storage
-│   │   │   └── task_tracker.ex       # Task execution
+│   │   │   ├── data_node.ex
+│   │   │   └── task_tracker.ex
 │   │   └── common/
-│   │       ├── block.ex              # Block utilities
-│   │       ├── job.ex                # Job specifications
-│   │       └── task.ex               # Task definitions
-├── docker-compose.yml                # Cluster configuration
+│   │       ├── block.ex
+│   │       ├── job.ex
+│   │       └── task.ex
+├── docker-compose.yml
 └── README.md
 ```
 
 ## 🔧 Konfigurasi
 
-### Settings Default
 ```elixir
-@replication_factor 2     # Replikasi setiap block
-@heartbeat_interval 5_000 # 5 detik
+@replication_factor 2
+@heartbeat_interval 5_000
 ```
 
 ## 🛠️ Troubleshooting
 
 ```bash
-# Cek status containers
 docker-compose ps
-
-# Monitor logs
 docker-compose logs -f master
-
-# Clean restart
 docker-compose down -v
 docker-compose up --build
 ```
 
-## 📄 License
+## 📄 Lisensi
 
-MIT License - Tugas Mini Project Pemrograman Fungsional
+MIT License — Tugas Mini Project Pemrograman Fungsional
