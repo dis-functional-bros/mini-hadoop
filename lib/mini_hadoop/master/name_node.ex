@@ -85,6 +85,7 @@ defmodule MiniHadoop.Master.NameNode do
     {:reply, :ok, %{state | datanodes: new_datanodes}}
   end
 
+  # TODO: Change to accept pathfile for storing file
   @impl true
   def handle_call({:store_file, filename, size, num_blocks}, _from, state) do
     # Check if file already exists
@@ -222,7 +223,7 @@ defmodule MiniHadoop.Master.NameNode do
     {:reply, datanodes, state}
   end
 
-  # FIXED: Use hostname instead of PID for heartbeats
+  # TODO: Change monitoring logic
   @impl true
   def handle_cast({:heartbeat, hostname, blocks}, state) do
     case Map.get(state.datanodes, hostname) do
@@ -265,8 +266,8 @@ defmodule MiniHadoop.Master.NameNode do
     end
   end
 
-  ## Private Functions
 
+  # TODO: Change to priority list for mapping block to node assignment
   defp assign_blocks_to_datanodes(block_ids, datanode_hostnames, replication_factor) do
     num_datanodes = length(datanode_hostnames)
     actual_replication = min(replication_factor, num_datanodes)

@@ -48,6 +48,11 @@ defmodule MiniHadoop.Slave.DataNode do
     GenServer.call(__MODULE__, :get_status)
   end
 
+# NEW: Method for sending blocks to other DataNodes for re-replication
+  def send_block_to_datanode(block_id, target_datanode) do
+    GenServer.call(__MODULE__, {:send_block_to_datanode, block_id, target_datanode}, 30_000)
+  end
+
   ## Server Callbacks
 
   @impl true
@@ -78,6 +83,13 @@ defmodule MiniHadoop.Slave.DataNode do
 
     {:ok, state}
   end
+
+  # TODO: Implementation sending to other slave logic
+  @impl true
+  def handle_call({:send_block_to_datanode, block_id, target_datanode}, _from, state) do
+    # Implementation for sending block to target DataNode
+  end
+
 
   @impl true
   def handle_call({:store_block, block_id, data}, _from, state) do

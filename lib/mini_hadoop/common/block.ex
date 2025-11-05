@@ -2,10 +2,13 @@ defmodule MiniHadoop.Common.Block do
   @moduledoc """
   Block data structure and utilities.
   """
-  
+
   defstruct [:id, :data, :size, :checksum]
 
   @block_size 64 * 1024 * 1024  # 64MB default
+
+
+  # TODO: Change the function to use higher order function for splitting with structure logic
 
   def split_into_blocks(data, block_size \\ @block_size) do
     data
