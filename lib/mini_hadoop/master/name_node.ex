@@ -96,15 +96,14 @@ defmodule MiniHadoop.Master.NameNode do
         "#{filename}_block_#{i}_#{:erlang.unique_integer([:positive])}"
       end)
 
-      # Assign blocks to datanodes
-      datanode_hostnames = Map.keys(state.datanodes)
+      datanodes = state.datanodes
 
-      if Enum.empty?(datanode_hostnames) do
+      if map_size(datanodes) == 0 do
         {:reply, {:error, :no_datanodes}, state}
       else
         block_assignments = assign_blocks_to_datanodes(
           block_ids,
-          datanode_hostnames,
+          datanodes,
           state.replication_factor
         )
 
@@ -120,9 +119,20 @@ defmodule MiniHadoop.Master.NameNode do
           end
         )
 
+        updated_datanodes =
+          Enum.reduce(block_assignments, datanodes, fn {block_id, hostnames}, acc ->
+            Enum.reduce(hostnames, acc, fn hostname, acc2 ->
+              Map.update!(acc2, hostname, fn info ->
+                current_blocks = info.blocks || []
+                %{info | blocks: Enum.uniq([block_id | current_blocks])}
+              end)
+            end)
+          end)
+
         new_state = %{state |
           file_registry: new_file_registry,
-          block_locations: new_block_locations
+          block_locations: new_block_locations,
+          datanodes: updated_datanodes
         }
 
         {:reply, {:ok, block_assignments}, new_state}
@@ -181,9 +191,26 @@ defmodule MiniHadoop.Master.NameNode do
           end
         )
 
+        updated_datanodes =
+          Enum.reduce(file_info.blocks, state.datanodes, fn block_id, acc ->
+            hostnames = Map.get(state.block_locations, block_id, [])
+
+            Enum.reduce(hostnames, acc, fn hostname, acc2 ->
+              if Map.has_key?(acc2, hostname) do
+                Map.update!(acc2, hostname, fn info ->
+                  current_blocks = info.blocks || []
+                  %{info | blocks: List.delete(current_blocks, block_id)}
+                end)
+              else
+                acc2
+              end
+            end)
+          end)
+
         new_state = %{state |
           file_registry: new_file_registry,
-          block_locations: new_block_locations
+          block_locations: new_block_locations,
+          datanodes: updated_datanodes
         }
 
         {:reply, :ok, new_state}
@@ -267,23 +294,46 @@ defmodule MiniHadoop.Master.NameNode do
   end
 
 
-  # TODO: Change to priority list for mapping block to node assignment
-  defp assign_blocks_to_datanodes(block_ids, datanode_hostnames, replication_factor) do
-    num_datanodes = length(datanode_hostnames)
-    actual_replication = min(replication_factor, num_datanodes)
+  def assign_blocks_to_datanodes(block_ids, datanodes, replication_factor) do
+    datanode_entries =
+      Enum.map(datanodes, fn {hostname, info} ->
+        load =
+          case info.blocks do
+            nil -> 0
+            blocks when is_list(blocks) -> length(blocks)
+            _ -> 0
+          end
 
-    block_ids
-    |> Enum.with_index()
-    |> Enum.map(fn {block_id, idx} ->
-      # Round-robin assignment with replication
-      assigned_nodes =
-        datanode_hostnames
-        |> Stream.cycle()
-        |> Stream.drop(idx)
-        |> Enum.take(actual_replication)
+        %{
+          hostname: hostname,
+          load: load
+        }
+      end)
 
-      {block_id, assigned_nodes}
-    end)
-    |> Enum.into(%{})
+    actual_replication =
+      datanode_entries
+      |> length()
+      |> min(replication_factor)
+
+    {assignments, _nodes} =
+      Enum.reduce(block_ids, {%{}, datanode_entries}, fn block_id, {acc, nodes_state} ->
+        sorted =
+          Enum.sort_by(nodes_state, fn node ->
+            {node.load, node.hostname}
+          end)
+
+        {selected, rest} = Enum.split(sorted, actual_replication)
+
+        updated_selected =
+          Enum.map(selected, fn node ->
+            %{node | load: node.load + 1}
+          end)
+
+        assigned_hostnames = Enum.map(selected, & &1.hostname)
+
+        {Map.put(acc, block_id, assigned_hostnames), updated_selected ++ rest}
+      end)
+
+    assignments
   end
 end
