@@ -19,7 +19,7 @@ defmodule MiniHadoop.Slave.DataNode do
   # Constants
   @initial_registration_delay 2_000
   @registration_retry_delay 5_000
-  @heartbeat_interval 5_000
+  @heartbeat_interval 10_000
   @rpc_timeout 10_000
 
   ## Client API
@@ -47,6 +47,7 @@ defmodule MiniHadoop.Slave.DataNode do
   def get_status do
     GenServer.call(__MODULE__, :get_status)
   end
+
 
 # NEW: Method for sending blocks to other DataNodes for re-replication
   def send_block_to_datanode(block_id, target_datanode) do
@@ -132,6 +133,8 @@ defmodule MiniHadoop.Slave.DataNode do
         {:reply, {:ok, data}, state}
     end
   end
+
+
 
   @impl true
   def handle_call({:delete_block, block_id}, _from, state) do

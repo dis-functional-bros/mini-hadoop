@@ -1,10 +1,10 @@
-defmodule MiniHadoop.Common.Task do
+defmodule MiniHadoop.Common.ProcessingTask do
   @moduledoc """
   Task data structure for individual map/reduce tasks.
-  
+
   NOTE: This is a skeleton implementation. MapReduce functionality not yet implemented.
   """
-  
+
   defstruct [
     :id,
     :job_id,
