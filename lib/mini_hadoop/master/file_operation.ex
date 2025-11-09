@@ -141,7 +141,7 @@ defmodule MiniHadoop.Master.FileOperation do
 
   def handle_call({:read_block, block_id}, _from, state) do
     # Step 1: Get block information from NameNode
-    case NameNode.get_block_info(block_id) do
+    case NameNode.block_info(block_id) do
       {:ok, %{datanodes: datanodes}} ->
         # Step 2: Try to read from one of the datanodes
         case read_block_from_datanodes(block_id, datanodes) do
@@ -326,9 +326,29 @@ defmodule MiniHadoop.Master.FileOperation do
     end
   end
 
+  defp extract_sequence_number(block_id) do
+    # Direct pattern matching for "anything_block_123_456"
+    case String.split(block_id, "_block_") do
+      [_, rest] ->
+        case String.split(rest, "_") do
+          [seq_str, _rand] ->
+            case Integer.parse(seq_str) do
+              {seq, ""} -> seq
+              _ -> 0
+            end
+
+          _ ->
+            0
+        end
+
+      _ ->
+        0
+    end
+  end
+
   defp stream_and_store_blocks(block_assignments, file_path, operation_id, task) do
     total_blocks = map_size(block_assignments)
-    block_ids = Map.keys(block_assignments) |> Enum.sort()
+    block_ids = Map.keys(block_assignments) |> Enum.sort_by(&extract_sequence_number/1)
     block_size = Block.get_block_size()
 
     stream =
@@ -346,12 +366,18 @@ defmodule MiniHadoop.Master.FileOperation do
                 block_id = Enum.at(block_ids, index)
                 datanodes = Map.get(block_assignments, block_id, [])
 
+                first_10_chars =
+                  chunk
+                  |> String.slice(0, 10)
+                  # Make newlines visible
+                  |> String.replace("\n", "\\n")
+
                 updated_task =
                   FileTask.update_progress(
                     task,
                     index + 1,
                     total_blocks,
-                    "Storing block #{index + 1}"
+                    "Storing block #{index + 1}, first chars: '#{first_10_chars}'"
                   )
 
                 update_task(operation_id, updated_task)

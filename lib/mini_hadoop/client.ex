@@ -10,8 +10,8 @@ defmodule MiniHadoop.Client do
   @doc """
   Store a file in the distributed file system.
   """
-  def store_file(filename, file_path, splitter_function \\ &MiniHadoop.Common.Block.default_splitter/2) do
-    FileOperation.store_file(filename, file_path, splitter_function)
+  def store_file(filename, file_path) do
+    FileOperation.store_file(filename, file_path)
   end
 
   @spec read_file(binary()) :: any()
@@ -34,6 +34,10 @@ defmodule MiniHadoop.Client do
   """
   def list_files do
     NameNode.list_files()
+  end
+
+  def file_info(filename) do
+    NameNode.file_info(filename)
   end
 
   def read_block(block_id) do

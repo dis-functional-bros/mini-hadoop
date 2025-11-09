@@ -145,21 +145,10 @@ defmodule MiniHadoop.Master.NameNode do
               Map.put(acc, block_id, hostnames)
           end)
 
-        updated_datanodes =
-          Enum.reduce(block_assignments, datanodes, fn {block_id, hostnames}, acc ->
-            Enum.reduce(hostnames, acc, fn hostname, acc2 ->
-              Map.update!(acc2, hostname, fn info ->
-                current_blocks = info.blocks || []
-                %{info | blocks: Enum.uniq([block_id | current_blocks])}
-              end)
-            end)
-          end)
-
         new_state = %{
           state
           | file_registry: new_file_registry,
-            block_locations: new_block_locations,
-            datanodes: updated_datanodes
+            block_locations: new_block_locations
         }
 
         {:reply, {:ok, block_assignments}, new_state}
