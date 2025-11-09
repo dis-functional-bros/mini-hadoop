@@ -36,7 +36,7 @@ services:
       - slave1_data:/tmp/mini_hadoop_data
     depends_on:
       - master
-    command: sh -c "sleep 10 && elixir --name slave1@slave1.node --cookie mini_hadoop_secret_cookie -S mix run --no-halt"
+    command: sh -c "sleep 5 && elixir --name slave1@slave1.node --cookie mini_hadoop_secret_cookie -S mix run --no-halt"
 
   slave2:
     build: .
@@ -55,7 +55,7 @@ services:
       - slave2_data:/tmp/mini_hadoop_data
     depends_on:
       - master
-    command: sh -c "sleep 15 && elixir --name slave2@slave2.node --cookie mini_hadoop_secret_cookie -S mix run --no-halt"
+    command: sh -c "sleep 10 && elixir --name slave2@slave2.node --cookie mini_hadoop_secret_cookie -S mix run --no-halt"
 
   slave3:
     build: .
@@ -74,7 +74,7 @@ services:
       - slave3_data:/tmp/mini_hadoop_data
     depends_on:
       - master
-    command: sh -c "sleep 20 && elixir --name slave3@slave3.node --cookie mini_hadoop_secret_cookie -S mix run --no-halt"
+    command: sh -c "sleep 15 && elixir --name slave3@slave3.node --cookie mini_hadoop_secret_cookie -S mix run --no-halt"
 
 networks:
   mini_hadoop_network:

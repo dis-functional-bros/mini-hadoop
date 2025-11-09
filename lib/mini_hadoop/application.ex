@@ -33,6 +33,7 @@ defmodule MiniHadoop.Application do
   defp master_children do
     [
       MiniHadoop.Master.NameNode,
+      MiniHadoop.Master.FileOperation
     ]
   end
 

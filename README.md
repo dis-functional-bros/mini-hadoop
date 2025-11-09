@@ -49,8 +49,9 @@ docker-compose up -d
 
 ### 3. Pengujian Cluster
 
+Enter MasterNode interactive shell
 ```bash
-docker exec -it mini_hadoop_master iex --name client@master --cookie mini_hadoop_secret_cookie
+docker exec -it mini_hadoop_master elixir --name client@master --cookie mini_hadoop_secret_cookie --remsh master@master.node
 ```
 
 ## 📚 Contoh Penggunaan API
