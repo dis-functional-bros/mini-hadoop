@@ -53,11 +53,47 @@ defmodule MiniHadoop.Client do
     datanodes = NameNode.get_datanodes()
     files = list_files()
 
+    # Get system uptime
+    uptime = case File.read("/proc/uptime") do
+      {:ok, content} ->
+        [uptime_seconds | _] = String.split(content)
+        {seconds, _} = Float.parse(uptime_seconds)
+        %{
+          seconds: seconds |> trunc(),
+          minutes: (seconds / 60) |> trunc(),
+          hours: (seconds / 3600) |> trunc(),
+          days: (seconds / 86400) |> trunc()
+        }
+      _ -> %{seconds: 0, minutes: 0, hours: 0, days: 0}
+    end
+
+    # Get cluster start time
+    started_at = case :erlang.statistics(:wall_clock) do
+      {total_wall, _} ->
+        DateTime.utc_now()
+        |> DateTime.add(-trunc(total_wall / 1000), :second)
+      _ -> nil
+    end
+
     %{
       datanodes: datanodes,
       num_files: length(files),
       total_blocks: count_total_blocks(files),
-      files: files
+      files: files,
+      uptime: uptime,
+      started_at: started_at,
+      datanode_stats: Enum.map(datanodes, fn dn ->
+        %{
+          hostname: dn.hostname,
+          blocks: length(dn.blocks || []),
+          last_heartbeat: dn.last_heartbeat,
+          status: (if DateTime.diff(DateTime.utc_now(), dn.last_heartbeat) < 30 do
+            :alive
+          else
+            :stale
+          end)
+        }
+      end)
     }
   end
 
