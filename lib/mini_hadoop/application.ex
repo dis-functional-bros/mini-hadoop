@@ -5,6 +5,9 @@ defmodule MiniHadoop.Application do
 
   @impl true
   def start(_type, _args) do
+    # Save application start time
+    Application.put_env(:mini_hadoop, :start_time, DateTime.utc_now())
+
     # Get node configuration from environment
     node_type = System.get_env("NODE_TYPE", "slave")
     master_node = System.get_env("MASTER_NODE", "master@master") |> String.to_atom()
