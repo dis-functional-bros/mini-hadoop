@@ -58,11 +58,16 @@ defmodule MiniHadoop.Client do
     now = DateTime.utc_now()
     uptime_seconds = DateTime.diff(now, app_start_time, :second)
 
+    days = div(uptime_seconds, 86400)
+    hours = div(rem(uptime_seconds, 86400), 3600)
+    minutes = div(rem(uptime_seconds, 3600), 60)
+    seconds = rem(uptime_seconds, 60)
+
     uptime = %{
-      seconds: uptime_seconds,
-      minutes: div(uptime_seconds, 60),
-      hours: div(uptime_seconds, 3600),
-      days: div(uptime_seconds, 86400)
+      days: days,
+      hours: hours,
+      minutes: minutes,
+      seconds: seconds
     }
 
     %{
@@ -71,19 +76,7 @@ defmodule MiniHadoop.Client do
       total_blocks: count_total_blocks(files),
       files: files,
       uptime: uptime,
-      started_at: app_start_time,
-      datanode_stats: Enum.map(datanodes, fn dn ->
-        %{
-          hostname: dn.hostname,
-          blocks: length(dn.blocks || []),
-          last_heartbeat: dn.last_heartbeat,
-          status: (if DateTime.diff(DateTime.utc_now(), dn.last_heartbeat) < 30 do
-            :alive
-          else
-            :stale
-          end)
-        }
-      end)
+      started_at: app_start_time
     }
   end
 

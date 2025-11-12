@@ -254,14 +254,37 @@ defmodule MiniHadoop.Master.NameNode do
   @impl true
   def handle_call(:get_datanodes, _from, state) do
     datanodes =
-      Enum.map(state.datanodes, fn {hostname, info} ->
+      for {hostname, info} <- state.datanodes do
+        # Ambil semua blok yang disimpan di DataNode ini
+        blocks_on_node =
+          state.block_locations
+          |> Enum.filter(fn {_block_id, hosts} -> hostname in hosts end)
+          |> Enum.map(fn {block_id, _} -> block_id end)
+
+        # Hitung total byte yang digunakan oleh blok-blok ini
+        total_bytes =
+          Enum.reduce(state.file_registry, 0, fn {_filename, file_info}, acc ->
+            total_blocks = length(file_info.blocks)
+
+            # Hindari pembagian 0
+            avg_block_size =
+              if total_blocks > 0, do: file_info.size / total_blocks, else: 0
+
+            # Hitung berapa blok file ini ada di node ini
+            blocks_here =
+              Enum.count(file_info.blocks, fn block_id -> block_id in blocks_on_node end)
+
+            acc + trunc(avg_block_size * blocks_here)
+          end)
+
         %{
           hostname: hostname,
           pid: info.pid,
           num_blocks: length(info.blocks),
+          used_storage: format_bytes(total_bytes),
           last_heartbeat: info.last_heartbeat
         }
-      end)
+      end
 
     {:reply, datanodes, state}
   end
@@ -390,6 +413,20 @@ defmodule MiniHadoop.Master.NameNode do
 
         {:noreply, new_state}
     end
+  end
+
+  defp format_bytes(0), do: "0 B"
+  defp format_bytes(bytes) when is_integer(bytes) and bytes > 0 do
+    units = ["B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"]
+
+    # Hitung berapa kali bisa dibagi 1024
+    power = floor(:math.log(bytes) / :math.log(1024))
+    power = min(power, length(units) - 1)  # jangan sampai out of range
+
+    value = bytes / :math.pow(1024, power)
+    formatted = Float.round(value, 2)
+
+    "#{formatted} #{Enum.at(units, power)}"
   end
 
   defp assign_blocks_to_datanodes(block_ids, datanodes_info, replication_factor) do
