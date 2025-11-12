@@ -49,7 +49,7 @@ defmodule MiniHadoop.Slave.DataNode do
   end
 
 
-# NEW: Method for sending blocks to other DataNodes for re-replication
+  # NEW: Method for sending blocks to other DataNodes for re-replication
   def send_block_to_datanode(block_id, target_datanode) do
     GenServer.call(__MODULE__, {:send_block_to_datanode, block_id, target_datanode}, 30_000)
   end
@@ -85,10 +85,15 @@ defmodule MiniHadoop.Slave.DataNode do
     {:ok, state}
   end
 
-  # TODO: Implementation sending to other slave logic
   @impl true
   def handle_call({:send_block_to_datanode, block_id, target_datanode}, _from, state) do
-    # Implementation for sending block to target DataNode
+    with {:ok, data} <- fetch_block_data(state, block_id),
+         :ok <- push_block_to_target(block_id, target_datanode, data) do
+      {:reply, :ok, state}
+    else
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
 
@@ -341,6 +346,43 @@ defmodule MiniHadoop.Slave.DataNode do
 
       {:error, _} ->
         state
+    end
+  end
+
+  defp fetch_block_data(state, block_id) do
+    case Map.get(state.blocks, block_id) do
+      nil ->
+        block_path = Path.join(state.storage_path, block_id)
+
+        case File.read(block_path) do
+          {:ok, data} -> {:ok, data}
+          {:error, _} -> {:error, :block_not_found}
+        end
+
+      data ->
+        {:ok, data}
+    end
+  end
+
+  defp push_block_to_target(block_id, target_pid, data) do
+    case :rpc.call(
+           node(target_pid),
+           __MODULE__,
+           :store_block,
+           [block_id, data],
+           @rpc_timeout
+         ) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+
+      :badrpc ->
+        {:error, :rpc_failed}
+
+      other ->
+        {:error, other}
     end
   end
 end

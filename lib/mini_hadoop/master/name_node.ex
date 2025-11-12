@@ -6,6 +6,8 @@ defmodule MiniHadoop.Master.NameNode do
   use GenServer
   require Logger
 
+  @transfer_timeout 30_000
+
   defstruct [
     # Map of filename -> %{blocks: [block_id], size: int, created_at: datetime}
     :file_registry,
@@ -362,17 +364,31 @@ defmodule MiniHadoop.Master.NameNode do
       hostname ->
         datanode_info = state.datanodes[hostname]
 
+        lost_blocks = datanode_info.blocks || []
+
         Logger.warning(
-          "DataNode #{hostname} disconnected. Lost #{length(datanode_info.blocks)} blocks"
+          "DataNode #{hostname} disconnected. Lost #{length(lost_blocks)} blocks"
         )
 
         # Remove from datanodes
-        new_datanodes = Map.delete(state.datanodes, hostname)
+        datanodes_without_failed = Map.delete(state.datanodes, hostname)
 
-        # TODO: Trigger block re-replication for lost blocks by doing rpc call.
-        # Do not send the data from datanode to namenode and then to destination datanode
+        {updated_block_locations, updated_datanodes} =
+          rebalance_blocks_after_failure(
+            lost_blocks,
+            hostname,
+            state.block_locations,
+            datanodes_without_failed,
+            state.replication_factor
+          )
 
-        {:noreply, %{state | datanodes: new_datanodes}}
+        new_state = %{
+          state
+          | datanodes: updated_datanodes,
+            block_locations: updated_block_locations
+        }
+
+        {:noreply, new_state}
     end
   end
 
@@ -423,5 +439,146 @@ defmodule MiniHadoop.Master.NameNode do
     Enum.find_value(datanodes, fn {hostname, info} ->
       if info.pid == pid, do: hostname
     end)
+  end
+
+  defp rebalance_blocks_after_failure(block_ids, failed_hostname, block_locations, datanodes, replication_factor) do
+    Enum.reduce(block_ids, {block_locations, datanodes}, fn block_id, {block_locs_acc, datanodes_acc} ->
+      {remaining_hosts, pruned_block_locs} =
+        remove_block_host(block_locs_acc, block_id, failed_hostname)
+
+      cond do
+        remaining_hosts == [] ->
+          Logger.error("All replicas lost for block #{block_id}. No sources available for re-replication.")
+          {pruned_block_locs, datanodes_acc}
+
+        length(remaining_hosts) >= replication_factor ->
+          {pruned_block_locs, datanodes_acc}
+
+        true ->
+          needed = replication_factor - length(remaining_hosts)
+
+          attempt_block_rereplication(
+            block_id,
+            remaining_hosts,
+            needed,
+            pruned_block_locs,
+            datanodes_acc
+          )
+      end
+    end)
+  end
+
+  defp remove_block_host(block_locations, block_id, hostname) do
+    hosts = Map.get(block_locations, block_id, [])
+    updated_hosts = List.delete(hosts, hostname)
+
+    updated_block_locations =
+      case updated_hosts do
+        [] -> Map.delete(block_locations, block_id)
+        _ -> Map.put(block_locations, block_id, updated_hosts)
+      end
+
+    {updated_hosts, updated_block_locations}
+  end
+
+  defp attempt_block_rereplication(_block_id, [], _needed, block_locations, datanodes) do
+    {block_locations, datanodes}
+  end
+
+  defp attempt_block_rereplication(block_id, source_hosts, needed, block_locations, datanodes) do
+    candidates =
+      datanodes
+      |> Enum.reject(fn {hostname, _} -> hostname in source_hosts end)
+      |> Enum.reject(fn {hostname, _} ->
+        hostname in Map.get(block_locations, block_id, [])
+      end)
+      |> Enum.sort_by(fn {hostname, info} ->
+        load =
+          case info.blocks do
+            blocks when is_list(blocks) -> length(blocks)
+            _ -> 0
+          end
+
+        {load, hostname}
+      end)
+      |> Enum.take(needed)
+
+    if Enum.empty?(candidates) do
+      Logger.warning(
+        "Unable to re-replicate block #{block_id}: no candidate DataNodes available."
+      )
+
+      {block_locations, datanodes}
+    else
+      Enum.reduce(Enum.with_index(candidates), {block_locations, datanodes}, fn
+        {{target_hostname, target_info}, idx}, {block_locs_acc, datanodes_acc} ->
+          source_hostname = Enum.at(source_hosts, rem(idx, length(source_hosts)))
+
+          case request_block_transfer(
+                 block_id,
+                 Map.get(datanodes_acc, source_hostname),
+                 target_info
+               ) do
+            :ok ->
+              Logger.info(
+                "Re-replicated block #{block_id} from #{source_hostname} to #{target_hostname}"
+              )
+
+              updated_block_locs =
+                Map.update(block_locs_acc, block_id, [target_hostname], fn hosts ->
+                  hosts ++ [target_hostname]
+                end)
+
+              updated_datanodes =
+                update_datanode_blocks(datanodes_acc, target_hostname, block_id)
+
+              {updated_block_locs, updated_datanodes}
+
+            {:error, reason} ->
+              Logger.error(
+                "Failed to re-replicate block #{block_id} from #{source_hostname} to #{target_hostname}: #{inspect(reason)}"
+              )
+
+              {block_locs_acc, datanodes_acc}
+          end
+      end)
+    end
+  end
+
+  defp request_block_transfer(_block_id, nil, _target_info), do: {:error, :source_unavailable}
+
+  defp request_block_transfer(block_id, source_info, target_info) do
+    try do
+      GenServer.call(
+        source_info.pid,
+        {:send_block_to_datanode, block_id, target_info.pid},
+        @transfer_timeout
+      )
+    catch
+      :exit, reason -> {:error, reason}
+    end
+  end
+
+  defp update_datanode_blocks(datanodes, hostname, block_id) do
+    case Map.fetch(datanodes, hostname) do
+      {:ok, info} ->
+        current_blocks =
+          case info.blocks do
+            blocks when is_list(blocks) -> blocks
+            _ -> []
+          end
+
+        new_blocks =
+          if block_id in current_blocks do
+            current_blocks
+          else
+            current_blocks ++ [block_id]
+          end
+
+        Map.put(datanodes, hostname, %{info | blocks: new_blocks})
+
+      :error ->
+        datanodes
+    end
   end
 end
