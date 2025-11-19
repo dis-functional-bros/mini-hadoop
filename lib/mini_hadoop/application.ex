@@ -1,5 +1,4 @@
 defmodule MiniHadoop.Application do
-  @moduledoc false
   use Application
   require Logger
 
@@ -8,43 +7,32 @@ defmodule MiniHadoop.Application do
     # Save application start time
     Application.put_env(:mini_hadoop, :start_time, DateTime.utc_now())
 
-    # Get node configuration from environment
-    node_type = System.get_env("NODE_TYPE", "slave")
+    node_type = System.get_env("NODE_TYPE", "worker")
     master_node = System.get_env("MASTER_NODE", "master@master") |> String.to_atom()
 
-    Logger.info("Node #{Node.self()} started with cookie: #{Node.get_cookie()}")
+    children =
+      case String.downcase(node_type) do
+        "master" ->
+          Logger.info("Starting MASTER Node : #{Node.self()}")
 
-    # Determine which children to start based on node type
-    children = case String.downcase(node_type) do
-      "master" ->
-        Logger.info("Starting MASTER node (NameNode only)")
-        master_children()
+          [
+            MiniHadoop.Master.MasterNode,
+            MiniHadoop.Master.FileOperation
+          ]
 
-      "slave" ->
-        Logger.info("Starting SLAVE node (DataNode only)")
-        slave_children(master_node)
+        "worker" ->
+          Logger.info("Starting WORKER Node : #{Node.self()}")
 
-      _ ->
-        Logger.error("Invalid NODE_TYPE: #{node_type}. Must be 'master' or 'slave'")
-        raise "Invalid NODE_TYPE"
-    end
+          [
+            {MiniHadoop.Worker.WorkerNode, [master: master_node]}
+          ]
+
+        _ ->
+          Logger.error("Invalid NODE_TYPE: #{node_type}. Must be 'master' or 'slave'")
+          raise "Invalid NODE_TYPE"
+      end
 
     opts = [strategy: :one_for_one, name: MiniHadoop.Supervisor]
     Supervisor.start_link(children, opts)
-  end
-
-  defp master_children do
-    [
-      MiniHadoop.Master.NameNode,
-      MiniHadoop.Master.FileOperation
-    ]
-  end
-
-  defp slave_children(master_node) do
-    node_name = Node.self() |> to_string()
-
-    [
-      {MiniHadoop.Slave.DataNode, [hostname: node_name, master_node: master_node]}
-    ]
   end
 end
