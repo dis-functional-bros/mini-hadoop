@@ -96,7 +96,7 @@ defmodule MiniHadoop.Master.MasterNode do
   def handle_call({:find_blocks_for_filename, filename}, _from, state) do
     case Map.get(state.filename_to_blocks, filename) do
       nil ->
-        {:reply, {:ok, []}, state}
+        {:reply, {:error, :file_not_found}, state}
 
       block_ids ->
         # Get block owners and sort by index
@@ -188,28 +188,32 @@ defmodule MiniHadoop.Master.MasterNode do
     # First, remove the old worker entry from the tree (if it exists)
     old_worker = Map.get(state.workers, updated_worker_state.hostname)
 
-    new_tree = if old_worker do
-      # Remove the old entry using the old block count
-      old_key = {length(old_worker.blocks), old_worker.pid}
-      case :gb_trees.is_defined(old_key, state.tree) do
-        true -> :gb_trees.delete(old_key, state.tree)
-        false -> state.tree
+    new_tree =
+      if old_worker do
+        # Remove the old entry using the old block count
+        old_key = {length(old_worker.blocks), old_worker.pid}
+
+        case :gb_trees.is_defined(old_key, state.tree) do
+          true -> :gb_trees.delete(old_key, state.tree)
+          false -> state.tree
+        end
+      else
+        state.tree
       end
-    else
-      state.tree
-    end
 
     # Update the workers map
-    new_map_workers = Map.update!(state.workers, updated_worker_state.hostname, fn worker ->
-      Map.put(worker, :blocks, updated_worker_state.blocks)
-    end)
+    new_map_workers =
+      Map.update!(state.workers, updated_worker_state.hostname, fn worker ->
+        Map.put(worker, :blocks, updated_worker_state.blocks)
+      end)
 
     # Insert the updated worker with new block count
-    new_tree = :gb_trees.insert(
-      {length(updated_worker_state.blocks), updated_worker_state.pid},
-      updated_worker_state,
-      new_tree
-    )
+    new_tree =
+      :gb_trees.insert(
+        {length(updated_worker_state.blocks), updated_worker_state.pid},
+        updated_worker_state,
+        new_tree
+      )
 
     state = %{state | tree: new_tree, workers: new_map_workers}
 

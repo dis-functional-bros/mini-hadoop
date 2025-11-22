@@ -4,6 +4,7 @@ defmodule MiniHadoop.Master.FileOperation do
   alias MiniHadoop.Common
 
   @default_timeout 3_000_000
+  @batch_size 100
 
   def start_link(_) do
     GenServer.start_link(__MODULE__, %{operations: %{}, next_id: 1}, name: __MODULE__)
@@ -15,12 +16,16 @@ defmodule MiniHadoop.Master.FileOperation do
     GenServer.call(__MODULE__, {:submit_store, filename, file_path}, @default_timeout)
   end
 
-  def read_file(filename) do
-    GenServer.call(__MODULE__, {:submit_read, filename}, @default_timeout)
+  def retrieve_file(filename) do
+    GenServer.call(__MODULE__, {:submit_retrieve, filename}, @default_timeout)
   end
 
   def delete_file(filename) do
     GenServer.call(__MODULE__, {:submit_delete, filename}, @default_timeout)
+  end
+
+  def get_status(task_id) do
+    GenServer.call(__MODULE__, {:get_status, task_id}, @default_timeout)
   end
 
   def init(init_arg) do
@@ -54,20 +59,20 @@ defmodule MiniHadoop.Master.FileOperation do
     {:reply, {:ok, new_state}, new_state}
   end
 
-  def handle_call({:submit_read, filename}, _from, state) do
-    operation_id = "read_#{state.next_id}"
+  def handle_call({:submit_retrieve, filename}, _from, state) do
+    operation_id = "retrieve_#{state.next_id}"
 
     task =
       Common.FileTask.new(%{
         id: operation_id,
-        type: :read,
+        type: :retrieve,
         filename: filename,
         file_path: nil,
         started_at: DateTime.utc_now(),
-        message: "Init reading"
+        message: "Init retrieve #{filename}"
       })
 
-    task_struct = Task.async(fn -> execute_read_operation(task) end)
+    task_struct = Task.async(fn -> execute_retrieve_operation(task) end)
     done_task = Task.await(task_struct, @default_timeout)
 
     new_state = %{
@@ -130,11 +135,19 @@ defmodule MiniHadoop.Master.FileOperation do
               {:error, :no_worker}
 
             worker_info ->
-              case GenServer.call(worker_info.pid, {:store_block, block_id, data}, @default_timeout) do
-                updated_worker_state ->
-                  # Register block -> worker mapping
-                  _ = MiniHadoop.Master.MasterNode.register_block_worker(block_id, updated_worker_state)
-                  _ = MiniHadoop.Master.MasterNode.update_tree(updated_worker_state)
+              case GenServer.call(
+                     worker_info.pid,
+                     {:store_block, block_id, data},
+                     @default_timeout
+                   ) do
+                %{} = updated_worker_state ->
+                  # Success - we got a worker state map
+                  MiniHadoop.Master.MasterNode.register_block_worker(
+                    block_id,
+                    updated_worker_state
+                  )
+
+                  MiniHadoop.Master.MasterNode.update_tree(updated_worker_state)
                   {:ok, block_id}
 
                 {:error, reason} ->
@@ -161,7 +174,6 @@ defmodule MiniHadoop.Master.FileOperation do
         # Since ordered: true, blocks come in order but we prepended, so reverse
 
         block_ids = block_ids |> Enum.reverse() |> Keyword.values()
-        IO.inspect(block_ids, label: "block_ids")
         MiniHadoop.Master.MasterNode.register_file_blocks(task.filename, block_ids)
         Common.FileTask.mark_completed(task, "All #{num_blocks} blocks stored successfully")
 
@@ -180,7 +192,7 @@ defmodule MiniHadoop.Master.FileOperation do
     end
   end
 
-  defp execute_read_operation(task) do
+  defp execute_retrieve_operation(task) do
     task = Common.FileTask.mark_running(task, "Finding blocks for file")
 
     case MiniHadoop.Master.MasterNode.find_blocks_for_filename(task.filename) do
@@ -188,80 +200,151 @@ defmodule MiniHadoop.Master.FileOperation do
         num_blocks = length(blocks_with_owners)
 
         if num_blocks == 0 do
-          Common.FileTask.mark_failed(task, :file_not_found, "No blocks found for file: #{task.filename}")
+          Common.FileTask.mark_failed(
+            task,
+            :file_not_found,
+            "No blocks found for file: #{task.filename}"
+          )
         else
-          task = Common.FileTask.update_progress(task, 0, num_blocks, "Reading #{num_blocks} blocks")
+          task =
+            Common.FileTask.update_progress(
+              task,
+              0,
+              num_blocks,
+              "Retrieving #{num_blocks} blocks"
+            )
+
+          # Create output file path
+          default_path = Path.join("/shared", task.filename)
+          :ok = File.mkdir_p("/shared")
+
+          # OPEN FILE ONCE for streaming write
+          {:ok, file_handle} = File.open(default_path, [:write, :raw, :binary])
 
           result =
             blocks_with_owners
             |> Task.async_stream(
-              fn {_index, block_id, worker_info} ->
-                case GenServer.call(worker_info.pid, {:read_block, block_id}, @default_timeout) do
-                  {:ok, block_data} -> {:ok, {block_id, block_data}}
-                  {:error, reason} -> {:error, {block_id, reason}}
+              fn {index, block_id, worker_info} ->
+                case GenServer.call(
+                       worker_info.pid,
+                       {:retrieve_block, block_id},
+                       @default_timeout
+                     ) do
+                  {:ok, block_data} ->
+                    {:ok, {index, block_data}}
+
+                  {:error, reason} ->
+                    {:error, {block_id, reason}}
                 end
               end,
               max_concurrency: 10_000,
               ordered: true,
               timeout: :infinity
             )
-            |> Enum.reduce_while({:ok, []}, fn
-              {:ok, {block_id, block_data}}, {:ok, acc} ->
-                {:cont, {:ok, [{block_id, block_data} | acc]}}
+            |> Enum.reduce_while({:ok, [], 0}, fn
+              {:ok, {index, block_data}}, {:ok, buffer, processed_count} ->
+                # Add block to buffer
+                new_buffer = [{index, block_data} | buffer]
+
+                # Check if we reached batch size
+                if length(new_buffer) >= @batch_size do
+                  # Sort blocks by index to maintain correct order
+                  sorted_batch =
+                    new_buffer
+                    |> Enum.reverse()
+                    |> Enum.map(fn {_, {_, data}} -> data end)
+                    |> IO.iodata_to_binary()
+
+                  # Write the entire batch
+                  case :file.write(file_handle, sorted_batch) do
+                    :ok ->
+                      new_count = processed_count + length(new_buffer)
+
+                      Common.FileTask.update_progress(
+                        task,
+                        new_count,
+                        num_blocks,
+                        "Processed #{new_count}/#{num_blocks} blocks"
+                      )
+
+                      # Reset buffer and continue
+                      {:cont, {:ok, [], new_count}}
+
+                    {:error, reason} ->
+                      {:halt, {:error, {:write_failed, reason}}}
+                  end
+                else
+                  # Continue accumulating blocks in buffer
+                  {:cont, {:ok, new_buffer, processed_count}}
+                end
 
               {:error, {block_id, reason}}, _acc ->
                 {:halt, {:error, {block_id, reason}}}
             end)
 
-          case result do
-            {:ok, blocks_data} ->
-              # Since ordered: true, blocks come in order, but we prepended so reverse
-              # Then sort by index to ensure correct order (in case of any issues)
-              IO.inspect(blocks_data, label: "blocks_data")
-              sorted_blocks =
-                blocks_data
-                |> Enum.reverse()
-                |> Keyword.values()
-                |> Enum.map(fn {block_id, data} ->
-                  index =
-                    block_id
-                    |> String.replace("#{task.filename}_block_", "")
-                    |> String.to_integer()
+          # Handle any remaining blocks in buffer after processing all streams
+          final_result =
+            case result do
+              {:ok, remaining_buffer, processed_count} when remaining_buffer != [] ->
+                # Write final partial batch
+                sorted_batch =
+                  remaining_buffer
+                  |> Enum.reverse()
+                  |> Enum.map(fn {_, {_, data}} -> data end)
+                  |> IO.iodata_to_binary()
 
-                  {index, data}
-                end)
-                |> Enum.sort_by(fn {index, _data} -> index end)
-                |> Enum.map(fn {_index, data} -> data end)
+                case :file.write(file_handle, sorted_batch) do
+                  :ok ->
+                    final_count = processed_count + length(remaining_buffer)
+                    {:ok, final_count}
 
-              # Reconstruct file by concatenating all blocks
-              file_content = IO.iodata_to_binary(sorted_blocks)
+                  {:error, reason} ->
+                    {:error, {:write_failed, reason}}
+                end
 
-              # Write to default shared location
-              default_path = Path.join("/shared", task.filename)
-              :ok = File.mkdir_p("/shared")
+              {:ok, _, processed_count} ->
+                {:ok, processed_count}
 
-              case File.write(default_path, file_content) do
-                :ok ->
-                  Common.FileTask.update_progress(
-                    task,
-                    num_blocks,
-                    num_blocks,
-                    "File reconstructed successfully"
-                  )
-                  |> Common.FileTask.mark_completed("File read and reconstructed: #{default_path}")
+              error ->
+                error
+            end
 
-                {:error, reason} ->
-                  Common.FileTask.mark_failed(task, reason, "Failed to write file: #{inspect(reason)}")
+          # CLOSE FILE regardless of result
+          :ok = File.close(file_handle)
+
+          case final_result do
+            {:ok, processed_count} ->
+              if processed_count == num_blocks do
+                Common.FileTask.mark_completed(
+                  task,
+                  "File reconstructed successfully: #{default_path}"
+                )
+              else
+                # Partial success - some blocks might have been written
+                Common.FileTask.mark_completed(
+                  task,
+                  "File partially reconstructed (#{processed_count}/#{num_blocks} blocks): #{default_path}"
+                )
               end
 
-            {:error, {block_id, reason}} ->
+            {:error, {:write_failed, reason}} ->
+              # Clean up partial file on write error
+              File.rm(default_path)
+
               Common.FileTask.mark_failed(
                 task,
                 reason,
-                "Failed to read block #{block_id}: #{inspect(reason)}"
+                "Failed to write file: #{inspect(reason)}"
               )
           end
         end
+
+      {:error, :file_not_found} ->
+        Common.FileTask.mark_failed(
+          task,
+          :file_not_found,
+          "File not found : #{inspect(task.filename)}"
+        )
 
       {:error, reason} ->
         Common.FileTask.mark_failed(task, reason, "Failed to find blocks: #{inspect(reason)}")
@@ -278,7 +361,8 @@ defmodule MiniHadoop.Master.FileOperation do
         if num_blocks == 0 do
           Common.FileTask.mark_completed(task, "No blocks found for file: #{task.filename}")
         else
-          task = Common.FileTask.update_progress(task, 0, num_blocks, "Deleting #{num_blocks} blocks")
+          task =
+            Common.FileTask.update_progress(task, 0, num_blocks, "Deleting #{num_blocks} blocks")
 
           result =
             blocks_with_owners
@@ -311,6 +395,7 @@ defmodule MiniHadoop.Master.FileOperation do
               # Unregister filename->blocks mapping after all blocks are deleted
               MiniHadoop.Master.MasterNode.unregister_file_blocks(task.filename)
               IO.inspect(task.filename, label: "task.filename")
+
               Common.FileTask.update_progress(
                 task,
                 num_blocks,
@@ -327,6 +412,13 @@ defmodule MiniHadoop.Master.FileOperation do
               )
           end
         end
+
+      {:error, :file_not_found} ->
+        Common.FileTask.mark_failed(
+          task,
+          :file_not_found,
+          "File not found : #{inspect(task.filename)}"
+        )
 
       {:error, reason} ->
         Common.FileTask.mark_failed(task, reason, "Failed to find blocks: #{inspect(reason)}")

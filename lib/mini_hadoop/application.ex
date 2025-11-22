@@ -24,7 +24,7 @@ defmodule MiniHadoop.Application do
           Logger.info("Starting WORKER Node : #{Node.self()}")
 
           [
-            {MiniHadoop.Worker.WorkerNode, [master: master_node]}
+            {MiniHadoop.Worker.DataNode, [master: master_node]}
           ]
 
         _ ->

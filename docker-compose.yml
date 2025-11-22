@@ -1,84 +1,107 @@
 services:
   master:
     build: .
+    container_name: master_node
     hostname: master
-    container_name: mini_hadoop_master
     environment:
       - NODE_TYPE=master
-      - COOKIE=mini_hadoop_secret_cookie
-      - MIX_ENV=dev
+      - MIX_ENV=dev # ← ADD THIS
     ports:
       - "4000:4000"
+    command: iex --sname master --cookie secret -S mix
+    stdin_open: true
+    tty: true
     networks:
-      mini_hadoop_network:
-        aliases:
-          - master.node
+      - hadoop_net
     volumes:
-      - ./:/app
-    command: elixir --name master@master.node --cookie mini_hadoop_secret_cookie -S mix run --no-halt
+      - ./data:/app/MiniHadoop/data
+      - ./data/shared:/shared
+    develop:
+      watch:
+        - action: sync+restart
+          path: .
+          target: /app
+        - action: rebuild
+          path: ./Dockerfile
 
-  slave1:
+  worker1:
     build: .
-    hostname: slave1
-    container_name: mini_hadoop_slave1
+    container_name: worker_node1
+    hostname: worker1
     environment:
-      - NODE_TYPE=slave
-      - MASTER_NODE=master@master.node
-      - MIX_ENV=dev
-    networks:
-      mini_hadoop_network:
-        aliases:
-          - slave1.node
-    volumes:
-      - ./:/app
-      - slave1_data:/tmp/mini_hadoop_data
+      - NODE_TYPE=worker
+      - MASTER_NODE=master@master
+      - MIX_ENV=dev # ← ADD THIS
+    command: iex --sname worker1 --cookie secret -S mix # ← FIX: unique sname
+    stdin_open: true
+    tty: true
     depends_on:
       - master
-    command: sh -c "sleep 5 && elixir --name slave1@slave1.node --cookie mini_hadoop_secret_cookie -S mix run --no-halt"
-
-  slave2:
-    build: .
-    hostname: slave2
-    container_name: mini_hadoop_slave2
-    environment:
-      - NODE_TYPE=slave
-      - MASTER_NODE=master@master.node
-      - MIX_ENV=dev
     networks:
-      mini_hadoop_network:
-        aliases:
-          - slave2.node
+      - hadoop_net
     volumes:
-      - ./:/app
-      - slave2_data:/tmp/mini_hadoop_data
+      - ./data/worker1:/app/MiniHadoop/data
+      - ./data/shared:/shared
+    develop:
+      watch:
+        - action: sync+restart
+          path: .
+          target: /app
+        - action: rebuild
+          path: ./Dockerfile
+
+  worker2:
+    build: .
+    container_name: worker_node2
+    hostname: worker2
+    environment:
+      - NODE_TYPE=worker
+      - MASTER_NODE=master@master
+      - MIX_ENV=dev # ← ADD THIS
+    command: iex --sname worker2 --cookie secret -S mix # ← FIX: unique sname
+    stdin_open: true
+    tty: true
     depends_on:
       - master
-    command: sh -c "sleep 10 && elixir --name slave2@slave2.node --cookie mini_hadoop_secret_cookie -S mix run --no-halt"
-
-  slave3:
-    build: .
-    hostname: slave3
-    container_name: mini_hadoop_slave3
-    environment:
-      - NODE_TYPE=slave
-      - MASTER_NODE=master@master.node
-      - MIX_ENV=dev
     networks:
-      mini_hadoop_network:
-        aliases:
-          - slave3.node
+      - hadoop_net
     volumes:
-      - ./:/app
-      - slave3_data:/tmp/mini_hadoop_data
+      - ./data/worker2:/app/MiniHadoop/data
+      - ./data/shared:/shared
+    develop:
+      watch:
+        - action: sync+restart
+          path: .
+          target: /app
+        - action: rebuild
+          path: ./Dockerfile
+
+  worker3:
+    build: .
+    container_name: worker_node3
+    hostname: worker3
+    environment:
+      - NODE_TYPE=worker
+      - MASTER_NODE=master@master
+      - MIX_ENV=dev # ← ADD THIS
+    command: iex --sname worker3 --cookie secret -S mix # ← FIX: unique sname
+    stdin_open: true
+    tty: true
     depends_on:
       - master
-    command: sh -c "sleep 15 && elixir --name slave3@slave3.node --cookie mini_hadoop_secret_cookie -S mix run --no-halt"
+    networks:
+      - hadoop_net
+    volumes:
+      - ./data/worker3:/app/MiniHadoop/data # ← FIX: was worker2
+      - ./data/shared:/shared
+    develop:
+      watch:
+        - action: sync+restart
+          path: .
+          target: /app
+        - action: rebuild
+          path: ./Dockerfile
 
 networks:
-  mini_hadoop_network:
+  hadoop_net:
     driver: bridge
-
-volumes:
-  slave1_data:
-  slave2_data:
-  slave3_data:
