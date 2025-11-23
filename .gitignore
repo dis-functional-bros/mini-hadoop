@@ -24,3 +24,10 @@ mini_hadoop-*.tar
 
 # Temporary files, for example, from tests.
 /tmp/
+
+data
+large.txt
+lorem.txt
+med.txt
+test.txt
+*.py

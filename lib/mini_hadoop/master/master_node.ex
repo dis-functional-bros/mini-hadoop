@@ -2,41 +2,43 @@ defmodule MiniHadoop.Master.MasterNode do
   use GenServer
   require Logger
 
+
   def start_link(args \\ %{}) do
     GenServer.start_link(__MODULE__, args, name: __MODULE__)
   end
 
-  def pop_smallest do
-    GenServer.call(__MODULE__, :pop_smallest, :infinity)
+  def get_state do
+    GenServer.call(__MODULE__, :get_state)
+  end
+
+  def pop_smallest(block_id) do
+    GenServer.call(__MODULE__, {:pop_smallest, block_id}, :infinity)
   end
 
   def update_tree(updated_worker_state) do
     GenServer.call(__MODULE__, {:update_tree, updated_worker_state})
   end
 
-  def lookup_block_owner(block_id) when is_binary(block_id) do
-    GenServer.call(__MODULE__, {:lookup_block_owner, block_id})
+  def filename_exists(filename) when is_binary(filename) do
+    GenServer.call(__MODULE__, {:filename_exists, filename})
   end
 
-  def find_blocks_for_filename(filename) when is_binary(filename) do
-    GenServer.call(__MODULE__, {:find_blocks_for_filename, filename})
+  def get_blocks_assingment_for_file(filename) when is_binary(filename) do
+    GenServer.call(__MODULE__, {:get_blocks_assingment_for_file, filename})
   end
 
   def register_file_blocks(filename, block_ids) when is_binary(filename) and is_list(block_ids) do
     GenServer.call(__MODULE__, {:register_file_blocks, filename, block_ids})
   end
 
-  def register_block_worker(block_id, worker_info) when is_binary(block_id) do
-    GenServer.call(__MODULE__, {:register_block_worker, block_id, worker_info})
-  end
-
   def unregister_file_blocks(filename) when is_binary(filename) do
     GenServer.call(__MODULE__, {:unregister_file_blocks, filename})
   end
 
-  def unregister_block_worker(block_id) when is_binary(block_id) do
-    GenServer.call(__MODULE__, {:unregister_block_worker, block_id})
+  def rebuild_tree_after_deletion do
+    GenServer.call(__MODULE__, {:rebuild_tree_after_deletion})
   end
+
 
   # init untuk state
   @impl true
@@ -50,8 +52,12 @@ defmodule MiniHadoop.Master.MasterNode do
        workers: %{},
        tree: nil,
        wait_queue: :queue.new(),
+       # Store mapping of filename to block IDs, {filename => [block_id, block_id, ...]}
        filename_to_blocks: %{},
-       block_to_worker: %{}
+       # Store mapping of block ID assignments to worker {worker_pid => {block_id=>true, block_id => true}}
+       worker_to_block_mapping: %{},
+       # Store mapping of worker information to block IDs (reverse mapping of block assignments) {block_id => [worker_pid, worker_pid, ...]}
+       block_to_worker_mapping: %{}
      }}
   end
 
@@ -63,8 +69,34 @@ defmodule MiniHadoop.Master.MasterNode do
         | last_heartbeat: :os.system_time(:millisecond)
       })
 
+    # Monitor worker process
+    Process.monitor(worker_state.pid)
+
     new_tree = rebuild_tree(new_workers)
     {:reply, :ok, %{state | workers: new_workers, tree: new_tree}}
+  end
+
+  # Complete implementation for re-replication of blocks
+  @impl true
+  def handle_call({:DOWN, worker_pid, _, _, _}, _from, state) do
+    # TODO: complete implementation of re-replication of blocks
+    block_ids = Map.get(state.worker_to_block_mapping, worker_pid, [])
+
+    # 1. Get other worker that has the block
+    # 2. Pick a new worker where the block will be replicated
+    # 3. Make a function call from the other worker to send the replicated block
+
+    # Update worker mapping
+    # new_worker_mapping = Map.put(state.worker_to_block_mapping, new_worker_state.hostname, block_ids)
+
+    # Update block mapping
+    #new_block_mapping = Map.put(state.block_to_worker_mapping, block_ids, new_worker_state.hostname)
+
+    # Delete worker from mapping
+    # new_workers = Map.delete(state.workers, worker_pid)
+
+    # Tree should be rebuilt by the update tree logic
+    # {:reply, :ok, %{state | workers: new_workers, tree: new_tree}}
   end
 
   @impl true
@@ -73,67 +105,37 @@ defmodule MiniHadoop.Master.MasterNode do
   end
 
   @impl true
-  def handle_call({:lookup_block_owner, block_id}, _from, state) do
-    case Map.get(state.block_to_worker, block_id) do
-      nil ->
-        {:reply, {:error, :block_not_found}, state}
-
-      worker_pid ->
-        # Get the latest worker info from workers map
-        worker_info =
-          state.workers
-          |> Map.values()
-          |> Enum.find(fn info -> info.pid == worker_pid end)
-
-        case worker_info do
-          nil -> {:reply, {:error, :worker_not_found}, state}
-          info -> {:reply, {:ok, info}, state}
-        end
-    end
+  def handle_call(:get_state, _from, state) do
+    {:reply, state, state}
   end
 
   @impl true
-  def handle_call({:find_blocks_for_filename, filename}, _from, state) do
+  def handle_call({:filename_exists, filename}, _from, state) do
+    {:reply, Map.has_key?(state.filename_to_blocks, filename), state}
+  end
+
+  @impl true
+  def handle_call({:get_blocks_assingment_for_file, filename}, _from, state) do
     case Map.get(state.filename_to_blocks, filename) do
       nil ->
         {:reply, {:error, :file_not_found}, state}
 
       block_ids ->
-        # Get block owners and sort by index
         blocks_with_owners =
           block_ids
           |> Enum.map(fn block_id ->
-            # Extract block index from block_id (format: "filename_block_0")
-            block_prefix = "#{filename}_block_"
-            index_str = String.replace(block_id, block_prefix, "")
+            # Get list of worker pids that have this block and pick the first one
+            index_str = String.replace(block_id, "#{filename}_block_", "")
 
             case Integer.parse(index_str) do
               {index, _} ->
-                worker_pid = Map.get(state.block_to_worker, block_id)
-
-                case worker_pid do
-                  nil ->
-                    nil
-
-                  _ ->
-                    # Get the latest worker info from workers map
-                    worker_info =
-                      state.workers
-                      |> Map.values()
-                      |> Enum.find(fn info -> info.pid == worker_pid end)
-
-                    case worker_info do
-                      nil -> nil
-                      info -> {index, block_id, info}
-                    end
-                end
-
+                worker_pids = Map.get(state.block_to_worker_mapping, block_id, [])
+                {index, block_id, worker_pids}
               :error ->
                 nil
             end
           end)
           |> Enum.filter(&(&1 != nil))
-          |> Enum.sort_by(fn {index, _block_id, _worker_info} -> index end)
 
         {:reply, {:ok, blocks_with_owners}, state}
     end
@@ -146,89 +148,9 @@ defmodule MiniHadoop.Master.MasterNode do
   end
 
   @impl true
-  def handle_call({:register_block_worker, block_id, worker_info}, _from, state) do
-    new_block_to_worker = Map.put(state.block_to_worker, block_id, worker_info.pid)
-    {:reply, :ok, %{state | block_to_worker: new_block_to_worker}}
-  end
-
-  @impl true
   def handle_call({:unregister_file_blocks, filename}, _from, state) do
-    IO.inspect(state.filename_to_blocks, label: "state.filename_to_blocks")
     new_filename_to_blocks = Map.delete(state.filename_to_blocks, filename)
     {:reply, :ok, %{state | filename_to_blocks: new_filename_to_blocks}}
-  end
-
-  @impl true
-  def handle_call({:unregister_block_worker, block_id}, _from, state) do
-    IO.inspect(state.block_to_worker, label: "state.block_to_worker")
-    new_block_to_worker = Map.delete(state.block_to_worker, block_id)
-    {:reply, :ok, %{state | block_to_worker: new_block_to_worker}}
-  end
-
-  @impl true
-  def handle_call(:pop_smallest, from, state) do
-    cond do
-      map_size(state.workers) == 0 ->
-        {:reply, {:error, :no_worker_registered}, state}
-
-      :gb_trees.is_empty(state.tree) ->
-        new_wait_queue = :queue.in(from, state.wait_queue)
-
-        # balas nanti, tidur di Beam VM
-        {:noreply, %{state | wait_queue: new_wait_queue}}
-
-      true ->
-        {_key, worker, new_tree} = :gb_trees.take_smallest(state.tree)
-        {:reply, {:ok, worker}, %{state | tree: new_tree}}
-    end
-  end
-
-  @impl true
-  def handle_call({:update_tree, updated_worker_state}, _from, state) do
-    # First, remove the old worker entry from the tree (if it exists)
-    old_worker = Map.get(state.workers, updated_worker_state.hostname)
-
-    new_tree =
-      if old_worker do
-        # Remove the old entry using the old block count
-        old_key = {length(old_worker.blocks), old_worker.pid}
-
-        case :gb_trees.is_defined(old_key, state.tree) do
-          true -> :gb_trees.delete(old_key, state.tree)
-          false -> state.tree
-        end
-      else
-        state.tree
-      end
-
-    # Update the workers map
-    new_map_workers =
-      Map.update!(state.workers, updated_worker_state.hostname, fn worker ->
-        Map.put(worker, :blocks, updated_worker_state.blocks)
-      end)
-
-    # Insert the updated worker with new block count
-    new_tree =
-      :gb_trees.insert(
-        {length(updated_worker_state.blocks), updated_worker_state.pid},
-        updated_worker_state,
-        new_tree
-      )
-
-    state = %{state | tree: new_tree, workers: new_map_workers}
-
-    case :queue.out(state.wait_queue) do
-      {:empty, _queue} ->
-        {:reply, :ok, state}
-
-      {{:value, from}, new_queue} ->
-        GenServer.reply(from, {:ok, updated_worker_state})
-
-        # Take the smallest (worker with least blocks)
-        {_key, _worker, new_tree2} = :gb_trees.take_smallest(state.tree)
-
-        {:reply, :ok, %{state | tree: new_tree2, wait_queue: new_queue}}
-    end
   end
 
   @impl true
@@ -248,10 +170,131 @@ defmodule MiniHadoop.Master.MasterNode do
     end
   end
 
+  @impl true
+  def handle_call({:rebuild_tree_after_deletion}, _from, state) do
+    {:reply, :ok, %{state | tree: rebuild_tree(state.workers)}}
+  end
+
   def rebuild_tree(workers_map) do
     Enum.reduce(workers_map, :gb_trees.empty(), fn {_id, info}, acc ->
-      key = {length(info.blocks), info.pid}
-      :gb_trees.insert(key, info, acc)
+      key = {info.blocks_count, info.pid}
+      :gb_trees.insert(key, info.hostname, acc)
     end)
   end
+
+  def handle_call({:pop_smallest, block_id}, from, state) do
+    cond do
+      map_size(state.workers) == 0 ->
+        {:reply, {:error, :no_worker_registered}, state}
+
+      :gb_trees.is_empty(state.tree) ->
+        new_wait_queue = :queue.in({from, block_id}, state.wait_queue)
+        {:noreply, %{state | wait_queue: new_wait_queue}}
+
+      true ->
+        # Get list of worker pids that already have this block
+        exclude_pids = Map.get(state.block_to_worker_mapping, block_id, [])
+        case find_smallest_excluding(state.tree, exclude_pids) do
+          {:ok, {block_count, worker_pid} = key, hostname} ->
+            new_tree = :gb_trees.delete(key, state.tree)
+            {:reply, {:ok, worker_pid}, %{state | tree: new_tree}}
+
+          :not_found ->
+            # No suitable worker found, add to queue with block_id
+            new_wait_queue = :queue.in({from, block_id}, state.wait_queue)
+            # IO.puts("No suitable worker, enter queue")
+            {:noreply, %{state | wait_queue: new_wait_queue}}
+        end
+    end
+  end
+
+  defp find_smallest_excluding(tree, exclude_pids) do
+    iterator = :gb_trees.iterator(tree)
+    find_in_iterator_excluding(iterator, exclude_pids)
+  end
+
+  defp find_in_iterator_excluding(iterator, exclude_pids) do
+    case :gb_trees.next(iterator) do
+      {{block_count, worker_pid}=key, hostname, next_iterator} ->
+        if worker_pid in exclude_pids do
+          find_in_iterator_excluding(next_iterator, exclude_pids)
+        else
+          {:ok, key, hostname}
+        end
+      :none -> :not_found
+    end
+  end
+
+  def handle_call({:update_tree, worker_state}, _from, state) do
+
+    {worker, initial_block_map, initial_worker_list} = case worker_state do
+      {:store, worker} ->
+        {worker, %{worker.changed_block => true}, [worker.pid]}
+      {:delete, worker} ->
+        {worker, %{}, []}
+    end
+
+    new_worker_to_block_mapping = Map.update(
+      state.worker_to_block_mapping, worker.pid, initial_block_map,
+      fn existing_block_map ->
+        case worker_state do
+          {:store, _} -> Map.put(existing_block_map, worker.changed_block, true)
+          {:delete, _} -> Map.delete(existing_block_map, worker.changed_block)
+        end
+      end
+    )
+
+    new_block_to_worker_mapping = Map.update(
+      state.block_to_worker_mapping, worker.changed_block, initial_worker_list,
+      fn existing_workers ->
+        case worker_state do
+          {:store, _} -> [worker.pid | existing_workers]
+          {:delete, _} -> List.delete(existing_workers, worker.pid)
+        end
+      end
+    )
+
+    # Clean up empty mappings
+    new_block_to_worker_mapping =
+      new_block_to_worker_mapping
+      |> Enum.reject(fn {_block, workers} -> workers == [] end)
+      |> Map.new()
+
+    new_tree = case worker_state do
+      {:store, _} -> :gb_trees.insert({worker.blocks_count, worker.pid}, worker.hostname, state.tree)
+      {:delete, _} -> state.tree
+    end
+
+    new_workers = Map.put(state.workers, worker.hostname, Map.delete(worker, :changed_block))
+
+    new_state = %{state |
+      tree: new_tree,
+      workers: new_workers,
+      block_to_worker_mapping: new_block_to_worker_mapping,
+      worker_to_block_mapping: new_worker_to_block_mapping
+    }
+
+    # Process wait queue
+    case :queue.out(new_state.wait_queue) do
+      {:empty, _queue} ->
+        {:reply, :ok, new_state}
+
+      {{:value, {waiting_from, block_id}}, new_queue} ->
+        # Find a suitable worker for the waiting request (considering block_id for exclusion)
+        exclude_pids = Map.get(new_state.block_to_worker_mapping, block_id, [])
+
+        case find_smallest_excluding(new_state.tree, exclude_pids) do
+          {:ok,{block_count, worker_pid} =key, hostname} ->
+            # Found a suitable worker, remove it from tree and reply to waiting process
+            new_tree_after_removal = :gb_trees.delete(key, new_state.tree)
+            GenServer.reply(waiting_from, {:ok, worker_pid})
+            {:reply, :ok, %{new_state | tree: new_tree_after_removal, wait_queue: new_queue}}
+
+          :not_found ->
+            # No suitable worker available yet, keep request in queue
+            {:reply, :ok, %{new_state | wait_queue: new_queue}}
+        end
+    end
+  end
+
 end

@@ -14,7 +14,7 @@ services:
     networks:
       - hadoop_net
     volumes:
-      - ./data:/app/MiniHadoop/data
+      - ./data:/app/mini_hadoop/data
       - ./data/shared:/shared
     develop:
       watch:
@@ -40,7 +40,7 @@ services:
     networks:
       - hadoop_net
     volumes:
-      - ./data/worker1:/app/MiniHadoop/data
+      - ./data/worker1:/app/mini_hadoop/data
       - ./data/shared:/shared
     develop:
       watch:
@@ -66,7 +66,7 @@ services:
     networks:
       - hadoop_net
     volumes:
-      - ./data/worker2:/app/MiniHadoop/data
+      - ./data/worker2:/app/mini_hadoop/data
       - ./data/shared:/shared
     develop:
       watch:
@@ -92,7 +92,33 @@ services:
     networks:
       - hadoop_net
     volumes:
-      - ./data/worker3:/app/MiniHadoop/data # ← FIX: was worker2
+      - ./data/worker3:/app/mini_hadoop/data # ← FIX: was worker2
+      - ./data/shared:/shared
+    develop:
+      watch:
+        - action: sync+restart
+          path: .
+          target: /app
+        - action: rebuild
+          path: ./Dockerfile
+
+  worker4:
+    build: .
+    container_name: worker_node4
+    hostname: worker4
+    environment:
+      - NODE_TYPE=worker
+      - MASTER_NODE=master@master
+      - MIX_ENV=dev # ← ADD THIS
+    command: iex --sname worker4 --cookie secret -S mix # ← FIX: unique sname
+    stdin_open: true
+    tty: true
+    depends_on:
+      - master
+    networks:
+      - hadoop_net
+    volumes:
+      - ./data/worker4:/app/mini_hadoop/data # ← FIX: was worker2
       - ./data/shared:/shared
     develop:
       watch:

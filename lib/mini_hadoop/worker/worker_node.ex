@@ -1,7 +1,7 @@
-defmodule MiniHadoop.Worker.DataNode do
+defmodule MiniHadoop.Worker.WorkerNode do
   use GenServer
   require Logger
-  alias MiniHadoop.Map
+  alias MiniHadoop.MapFunction
 
   @register_timeout 5000
   @max_retries 5
@@ -16,7 +16,8 @@ defmodule MiniHadoop.Worker.DataNode do
     :master,
     :last_heartbeat,
     registration_attempts: 0,
-    blocks: []
+    blocks_count: 0,
+    blocks: %{}
   ]
 
   def start_link(args) do
@@ -30,7 +31,7 @@ defmodule MiniHadoop.Worker.DataNode do
     state = %__MODULE__{
       pid: self(),
       hostname: Node.self(),
-      status: :offline,
+      status: :online,
       running_task: nil,
       master: args[:master],
       path: default_path
@@ -50,7 +51,7 @@ defmodule MiniHadoop.Worker.DataNode do
     try do
       case GenServer.call(
              {MiniHadoop.Master.MasterNode, state.master},
-             {:register_worker, state},
+             {:register_worker, trim_send_state(state)},
              @register_timeout
            ) do
         :ok ->
@@ -82,15 +83,20 @@ defmodule MiniHadoop.Worker.DataNode do
     {:noreply, state}
   end
 
+
+
   def handle_call({:store_block, block_id, block_data}, _from, state) do
     file_path = Path.join(state.path, block_id)
     File.write!(file_path, block_data)
 
-    new_blocks = [block_id | state.blocks]
-    new_state = %{state | blocks: new_blocks, running_task: nil}
-    IO.inspect(new_state, label: "new_state")
-    {:reply, new_state, new_state}
+    new_blocks = Map.put(state.blocks, block_id, true)
+    new_blocks_count = state.blocks_count + 1
+    new_state = %{state | blocks: new_blocks, blocks_count: new_blocks_count, running_task: nil}
+    result = trim_send_state(new_state)
+    result = Map.put(result,:changed_block, block_id )
+    {:reply, {:store, result}, new_state}
   end
+
 
   def handle_call({:run_map, block_id, map_module, context}, _from, state) do
     block_path = Path.join(state.path, block_id)
@@ -119,7 +125,7 @@ defmodule MiniHadoop.Worker.DataNode do
     block_path = Path.join(state.path, block_id)
 
     result =
-      if File.exists?(block_path) do
+      if Map.has_key?(state.blocks, block_id) do
         case File.read(block_path) do
           {:ok, data} -> {:ok, data}
           {:error, reason} -> {:error, reason}
@@ -134,14 +140,21 @@ defmodule MiniHadoop.Worker.DataNode do
   def handle_call({:delete_block, block_id}, _from, state) do
     block_path = Path.join(state.path, block_id)
 
-    new_blocks = List.delete(state.blocks, block_id)
-    new_state = %{state | blocks: new_blocks}
-    IO.inspect(new_state, label: "new_state")
+    new_blocks_count = state.blocks_count - 1
+    new_blocks = Map.delete(state.blocks, block_id)
+    new_state = %{state | blocks: new_blocks, blocks_count: new_blocks_count}
 
-    if File.exists?(block_path) do
-      File.rm!(block_path)
+    if Map.has_key?(state.blocks, block_id) do
+      spawn(fn -> File.rm!(block_path) end)
     end
 
-    {:reply, new_state, new_state}
+    result = trim_send_state(new_state)
+    result = Map.put(result, :changed_block, block_id)
+
+    {:reply,{:delete, result}, new_state}
+  end
+
+  defp trim_send_state(state) do
+    Map.take(state, [:pid, :hostname, :status, :running_task, :blocks_count, :last_heartbeat, :registration_attempts])
   end
 end
