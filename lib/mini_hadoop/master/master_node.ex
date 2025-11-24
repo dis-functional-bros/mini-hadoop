@@ -189,6 +189,7 @@ defmodule MiniHadoop.Master.MasterNode do
 
       :gb_trees.is_empty(state.tree) ->
         new_wait_queue = :queue.in({from, block_id}, state.wait_queue)
+        IO.puts("No suitable worker, enter queue")
         {:noreply, %{state | wait_queue: new_wait_queue}}
 
       true ->
@@ -273,26 +274,39 @@ defmodule MiniHadoop.Master.MasterNode do
       block_to_worker_mapping: new_block_to_worker_mapping,
       worker_to_block_mapping: new_worker_to_block_mapping
     }
-
-    # Process wait queue
-    case :queue.out(new_state.wait_queue) do
-      {:empty, _queue} ->
+    case worker_state do
+      {:store, _} ->
+        # Process queue ASYNCHRONOUSLY to avoid deadlocks
+        if not :queue.is_empty(new_state.wait_queue) do
+          GenServer.cast(self(), :process_queue)
+        end
         {:reply, :ok, new_state}
+      {:delete, _} ->
+        {:reply, :ok, new_state}
+    end
+
+  end
+
+  def handle_cast(:process_queue, state) do
+    case :queue.out(state.wait_queue) do
+      {:empty, _queue} ->
+        {:noreply, state}
 
       {{:value, {waiting_from, block_id}}, new_queue} ->
-        # Find a suitable worker for the waiting request (considering block_id for exclusion)
-        exclude_pids = Map.get(new_state.block_to_worker_mapping, block_id, [])
+        exclude_pids = Map.get(state.block_to_worker_mapping, block_id, [])
 
-        case find_smallest_excluding(new_state.tree, exclude_pids) do
-          {:ok,{block_count, worker_pid} =key, hostname} ->
-            # Found a suitable worker, remove it from tree and reply to waiting process
-            new_tree_after_removal = :gb_trees.delete(key, new_state.tree)
+        case find_smallest_excluding(state.tree, exclude_pids) do
+          {:ok, {block_count, worker_pid} = key, hostname} ->
+            new_tree_after_removal = :gb_trees.delete(key, state.tree)
             GenServer.reply(waiting_from, {:ok, worker_pid})
-            {:reply, :ok, %{new_state | tree: new_tree_after_removal, wait_queue: new_queue}}
+
+            # Continue processing more queue items
+            GenServer.cast(self(), :process_queue)
+            {:noreply, %{state | tree: new_tree_after_removal, wait_queue: new_queue}}
 
           :not_found ->
-            # No suitable worker available yet, keep request in queue
-            {:reply, :ok, %{new_state | wait_queue: new_queue}}
+            # No worker found, stop processing
+            {:noreply, state}
         end
     end
   end

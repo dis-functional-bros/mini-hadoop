@@ -46,10 +46,10 @@ defmodule MiniHadoop.Common.FileTask do
   # Progress updater
   def update_progress(task, blocks_processed, total_blocks, message \\ nil) do
     progress =
-      if total_blocks > 0 do
-        Float.round(blocks_processed / total_blocks * 100, 1)
-      else
-        0
+      cond do
+        total_blocks <= 0 -> 0
+        blocks_processed >= total_blocks -> 100.0
+        true -> Float.round(blocks_processed / total_blocks * 100, 1)
       end
 
     %{
@@ -60,7 +60,6 @@ defmodule MiniHadoop.Common.FileTask do
         message: message || task.message
     }
   end
-
   # --------------------
   # Generic status updater
   defp mark_status(task, status, message, reason \\ nil) do
@@ -68,17 +67,23 @@ defmodule MiniHadoop.Common.FileTask do
 
     {started_at, completed_at, total_time} =
       case status do
+        :started ->
+          # Only set started_at
+          {now, nil, nil}
+
         :running ->
-          # hanya set started_at
-          {now, task.completed_at, task.total_time}
+          # Keep existing started_at, no completed_at yet
+          {task.started_at || now, nil, nil}
 
         :completed ->
-          # set completed_at + hitung total_time
-          {task.started_at, now, calculate_total_time(task.started_at, now)}
+          # Set completed_at and calculate total time in seconds
+          started = task.started_at || now
+          {started, now, DateTime.diff(now, started, :second)}
 
         :failed ->
-          # set completed_at + hitung total_time
-          {task.started_at, now, calculate_total_time(task.started_at, now)}
+          # Set completed_at and calculate total time in seconds
+          started = task.started_at || now
+          {started, now, DateTime.diff(now, started, :second)}
 
         _ ->
           {task.started_at, task.completed_at, task.total_time}
@@ -97,15 +102,15 @@ defmodule MiniHadoop.Common.FileTask do
 
   # --------------------
   # Public helpers
-  def mark_running(task, message \\ "Starting operation"),
-    do: mark_status(%{task | started_at: DateTime.utc_now()}, :running, message)
+  def mark_started(task, message \\ "Starting operation"),
+    do: mark_status(task, :started, message)
+
+  def mark_running(task, message \\ "Operation in progress"),
+    do: mark_status(task, :running, message)
 
   def mark_completed(task, message \\ "Completed"),
     do: mark_status(task, :completed, message)
 
   def mark_failed(task, reason, message \\ "Operation failed"),
     do: mark_status(task, :failed, message, reason)
-
-  defp calculate_total_time(started_at, completed_at),
-    do: DateTime.diff(completed_at, started_at, :millisecond)
 end

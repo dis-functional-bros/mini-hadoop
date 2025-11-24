@@ -29,8 +29,8 @@ defmodule MiniHadoop do
     end
   end
 
-  def task_status(task_id) when is_binary(task_id) do
-    FileOperation.get_status(task_id)
+  def file_op_info(task_id) when is_binary(task_id) do
+    FileOperation.get_operation_info(task_id)
   end
 
   def cluster_info do

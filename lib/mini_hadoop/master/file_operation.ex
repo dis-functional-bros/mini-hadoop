@@ -26,12 +26,21 @@ defmodule MiniHadoop.Master.FileOperation do
     GenServer.call(__MODULE__, {:submit_delete, filename}, @default_timeout)
   end
 
-  def get_status(task_id) do
-    GenServer.call(__MODULE__, {:get_status, task_id}, @default_timeout)
+  def get_operation_info(task_id) do
+    GenServer.call(__MODULE__, {:get_operation_info, task_id}, @default_timeout)
   end
 
-  def init(init_arg) do
-    {:ok, init_arg}
+  def init(_) do
+    {:ok, %{operations: %{}, next_id: 1}}
+  end
+
+  def handle_cast({:update_operation, operation_id, operation_new_state}, state) do
+    new_state = %{state | operations: Map.put(state.operations, operation_id, operation_new_state)}
+    {:noreply, new_state}
+  end
+
+  def handle_call({:get_operation_info, operation_id}, _from, state) do
+    {:reply, Map.get(state.operations, operation_id), state}
   end
 
   # ---------------------
@@ -40,32 +49,10 @@ defmodule MiniHadoop.Master.FileOperation do
     cond do
       !File.exists?(file_path) ->
         {:reply, {:error, "File not found"}, state}
-
       MasterNode.filename_exists(filename) ->
         {:reply, {:error, "Filename already in use"}, state}
-
       true ->
-        operation_id = "store_#{state.next_id}"
-        task =
-          Common.FileTask.new(%{
-            id: operation_id,
-            type: :store,
-            filename: filename,
-            file_path: file_path,
-            started_at: DateTime.utc_now(),
-            message: "Init storing"
-          })
-
-        task_struct = Task.async(fn -> execute_store_operation(task) end)
-        done_task = Task.await(task_struct, @default_timeout)
-
-        new_state = %{
-          state
-          | operations: Map.put(state.operations, operation_id, done_task),
-            next_id: state.next_id + 1
-        }
-
-        {:reply, {:ok, new_state}, new_state}
+        create_and_start_operation(:store, filename, file_path, state)
     end
   end
 
@@ -73,33 +60,10 @@ defmodule MiniHadoop.Master.FileOperation do
     cond do
       filename == "" ->
         {:reply, {:error, "Filename cannot be empty"}, state}
-
       !MasterNode.filename_exists(filename) ->
         {:reply, {:error, "File does not exist"}, state}
-
       true ->
-        operation_id = "retrieve_#{state.next_id}"
-
-        task =
-          Common.FileTask.new(%{
-            id: operation_id,
-            type: :retrieve,
-            filename: filename,
-            file_path: nil,
-            started_at: DateTime.utc_now(),
-            message: "Init retrieve #{filename}"
-          })
-
-        task_struct = Task.async(fn -> execute_retrieve_operation(task) end)
-        done_task = Task.await(task_struct, @default_timeout)
-
-        new_state = %{
-          state
-          | operations: Map.put(state.operations, operation_id, done_task),
-            next_id: state.next_id + 1
-        }
-
-        {:reply, {:ok, done_task}, new_state}
+        create_and_start_operation(:retrieve, filename, nil, state)
     end
   end
 
@@ -107,38 +71,41 @@ defmodule MiniHadoop.Master.FileOperation do
     cond do
       filename == "" ->
         {:reply, {:error, "Filename cannot be empty"}, state}
-
       !MasterNode.filename_exists(filename) ->
         {:reply, {:error, "File does not exist"}, state}
-
       true ->
-        operation_id = "delete_#{state.next_id}"
-
-        task =
-          Common.FileTask.new(%{
-            id: operation_id,
-            type: :delete,
-            filename: filename,
-            file_path: nil,
-            started_at: DateTime.utc_now(),
-            message: "Init deleting"
-          })
-
-        task_struct = Task.async(fn -> execute_delete_operation(task) end)
-        done_task = Task.await(task_struct, @default_timeout)
-
-        new_state = %{
-          state
-          | operations: Map.put(state.operations, operation_id, done_task),
-            next_id: state.next_id + 1
-        }
-
-        {:reply, {:ok, done_task}, new_state}
+        create_and_start_operation(:delete, filename, nil, state)
     end
   end
 
-  def handle_call({:get_status, op_id}, _from, state) do
-    {:reply, Map.get(state.operations, op_id), state}
+  # Operation Creation Helper
+  defp create_and_start_operation(type, filename, file_path, state) do
+    operation_id = "#{type}_#{state.next_id}"
+
+    task = Common.FileTask.new(%{
+      id: operation_id,
+      type: type,
+      filename: filename,
+      file_path: file_path
+    })
+    |> Common.FileTask.mark_started("Initializing #{type} operation")
+
+    new_state = %{
+      state
+      | operations: Map.put(state.operations, operation_id, task),
+        next_id: state.next_id + 1
+    }
+
+    # Start operation based on type
+    Task.start(fn ->
+      case type do
+        :store -> execute_store_operation(task)
+        :retrieve -> execute_retrieve_operation(task)
+        :delete -> execute_delete_operation(task)
+      end
+    end)
+
+    {:reply, {:ok, %{operation_id: operation_id, status: :started, task: task}}, new_state}
   end
 
   defp wait_for_worker(block_id) do
@@ -153,78 +120,149 @@ defmodule MiniHadoop.Master.FileOperation do
   defp execute_store_operation(task) do
     task = Common.FileTask.mark_running(task, "Calculating file size")
     file_size = File.stat!(task.file_path).size
-    num_blocks = Common.Block.calculate_num_blocks(file_size) * @replication_factor
+    num_blocks = Common.Block.calculate_num_blocks(file_size)
+    total_operations = num_blocks * @replication_factor
 
-    task = Common.FileTask.update_progress(task, 0, num_blocks * @replication_factor, "Allocating blocks")
+    task = Common.FileTask.update_progress(task, 0, total_operations, "Allocating blocks")
     block_size = Common.Block.get_block_size()
     IO.puts("Number of blocks: #{num_blocks}")
 
+    # Send initial state update via cast (async)
+    GenServer.cast(__MODULE__, {:update_operation, task.id, task})
+
+    # Process file in chunks and update progress
     result =
       File.stream!(task.file_path, block_size, [:read, :binary])
       |> Stream.with_index()
-      |> Task.async_stream(
-        fn {data, index} ->
-          block_id = "#{task.filename}_block_#{index}"
+      |> Stream.chunk_every(@batch_size)  # Process 10 blocks at a time
+      |> Enum.reduce_while({:ok, [], 0}, fn chunk, {status, acc_blocks, processed_count} ->
+        case status do
+          {:error, _} -> {:halt, {status, acc_blocks, processed_count}}
+          _ ->
+            # Process current chunk
+            chunk_result =
+              chunk
+              |> Task.async_stream(
+                fn {data, index} ->
+                  block_id = "#{task.filename}_block_#{index}"
 
-          # Sequential replication instead of parallel
-          success_count =
-            Enum.reduce_while(1..@replication_factor, 0, fn attempt, count ->
-              case wait_for_worker(block_id) do
-                :no_worker_registered ->
-                  {:cont, count}  # Try next attempt
-                worker_pid ->
-                  case GenServer.call(worker_pid, {:store_block, block_id, data}, @default_timeout) do
-                    {:store, updated_worker_state} ->
-                      MasterNode.update_tree({:store, updated_worker_state})
-                      if count + 1 >= @replication_factor,
-                        do: {:halt, count + 1},
-                        else: {:cont, count + 1}
-                    _ ->
-                      {:cont, count}  # Try next attempt
-                  end
+                  # Sequential replication
+                  success_count =
+                    Enum.reduce_while(1..@replication_factor, 0, fn attempt, count ->
+                      case wait_for_worker(block_id) do
+                        :no_worker_registered ->
+                          {:cont, count}
+                        worker_pid ->
+                          case GenServer.call(worker_pid, {:store_block, block_id, data}, @default_timeout) do
+                            {:store, updated_worker_state} ->
+                              MasterNode.update_tree({:store, updated_worker_state})
+                              IO.puts("Block stored successfully")
+                              if count + 1 >= @replication_factor,
+                                do: {:halt, count + 1},
+                                else: {:cont, count + 1}
+                            _ ->
+                              {:cont, count}
+                          end
+                      end
+                    end)
+
+                  if success_count >= @replication_factor,
+                    do: {:ok, {index, block_id}},
+                    else: {:error, :insufficient_replication}
+                end,
+                max_concurrency: 10_000,
+                ordered: true,
+                timeout: :infinity
+              )
+              |> Enum.reduce_while({:ok, []}, fn
+                {:ok, {:ok, block_data}}, {:ok, acc} -> {:cont, {:ok, [block_data | acc]}}
+                {:ok, {:error, reason}}, _acc -> {:halt, {:error, reason}}
+                {:exit, reason}, _acc -> {:halt, {:error, reason}}
+              end)
+
+              case chunk_result do
+                {:ok, chunk_blocks} ->
+                  # Sort this chunk immediately while it's small
+                  sorted_chunk_blocks =
+                    chunk_blocks
+                    |> Enum.sort_by(fn {index, _block_id} -> index end)
+
+                  # Update progress after each chunk
+                  new_processed_count = processed_count + (length(chunk) * @replication_factor)
+                  updated_task = Common.FileTask.update_progress(
+                    task,
+                    new_processed_count,
+                    total_operations,
+                    "Processed #{new_processed_count}/#{total_operations} operations"
+                  )
+
+                  # Send async update to avoid deadlock
+                  GenServer.cast(__MODULE__, {:update_operation, task.id, updated_task})
+
+                  # Prepend sorted chunk for O(1) performance
+                  {:cont, {:ok, [sorted_chunk_blocks | acc_blocks], new_processed_count}}
+
+                {:error, reason} ->
+                  # Send final error state
+                  failed_task = Common.FileTask.mark_failed(task, reason, "Failed: #{inspect(reason)}")
+                  GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
+                  {:halt, {{:error, reason}, acc_blocks, processed_count}}
               end
-            end)
-
-          if success_count >= @replication_factor,
-            do: {:ok, block_id},
-            else: {:error, :insufficient_replication}
-        end,
-        max_concurrency: 4,  # Match your worker count
-        ordered: true,
-        timeout: :infinity
-      )
-      |> Enum.reduce_while({:ok, []}, fn
-        {:ok, {:ok, block_id}}, {:ok, acc} -> {:cont, {:ok, [block_id | acc]}}
-        {:ok, {:error, reason}}, _acc -> {:halt, {:error, reason}}
-        {:exit, reason}, _acc -> {:halt, {:error, reason}}
+        end
       end)
 
-    # Check final result
+    # Handle final result
     case result do
-      {:ok, block_ids} ->
-        block_ids = block_ids |> Enum.reverse()
-        MiniHadoop.Master.MasterNode.register_file_blocks(task.filename, block_ids)
-        Common.FileTask.mark_completed(task, "All #{num_blocks} blocks stored successfully")
+      {{:error, reason}, _blocks, _processed} ->
+        # Already sent error state above
+        {:error, reason}
 
-      {:error, :no_worker} ->
-        Common.FileTask.mark_failed(task, :no_worker, "No worker registered")
+      {:ok, reversed_chunk_list, final_processed} ->
+        # Reverse chunks to get correct order, then flatten
+        sorted_block_ids_with_index =
+          reversed_chunk_list
+          |> Enum.reverse()
+          |> List.flatten()
 
-      {:error, reason} ->
-        Common.FileTask.mark_failed(task, :error, "Failed: #{inspect(reason)}")
+        # Blocks are now sorted! Just extract block_ids
+        sorted_block_ids = Enum.map(sorted_block_ids_with_index, fn {_index, block_id} -> block_id end)
+
+        # Final progress update to 100%
+        task_with_final_progress = Common.FileTask.update_progress(
+          task,
+          total_operations,
+          total_operations,
+          "All #{total_operations} blocks stored successfully"
+        )
+
+        completed_task = Common.FileTask.mark_completed(
+          task_with_final_progress,
+          "All #{total_operations} blocks stored successfully"
+        )
+
+        MiniHadoop.Master.MasterNode.register_file_blocks(task.filename, sorted_block_ids)
+
+        # Send final success state
+        GenServer.cast(__MODULE__, {:update_operation, task.id, completed_task})
+        {:ok, completed_task}
     end
   end
 
   defp execute_retrieve_operation(task) do
     task = Common.FileTask.mark_running(task, "Finding blocks for file")
+    GenServer.cast(__MODULE__, {:update_operation, task.id, task})
 
     case MiniHadoop.Master.MasterNode.get_blocks_assingment_for_file(task.filename) do
       {:ok, blocks_with_owners} ->
         num_blocks = length(blocks_with_owners)
 
         if num_blocks == 0 do
-          Common.FileTask.mark_failed(task, :file_not_found, "No blocks found for file: #{task.filename}")
+          failed_task = Common.FileTask.mark_failed(task, :file_not_found, "No blocks found for file: #{task.filename}")
+          GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
+          failed_task
         else
           task = Common.FileTask.update_progress(task, 0, num_blocks, "Retrieving #{num_blocks} blocks")
+          GenServer.cast(__MODULE__, {:update_operation, task.id, task})
 
           # Create output file path
           default_path = Path.join("/shared", task.filename)
@@ -236,7 +274,7 @@ defmodule MiniHadoop.Master.FileOperation do
           result =
             blocks_with_owners
             |> Task.async_stream(
-              fn {index, block_id, [first_worker_pid, _ ]} ->
+              fn {index, block_id, [first_worker_pid | _]} ->
                 case GenServer.call(first_worker_pid, {:retrieve_block, block_id}, @default_timeout) do
                   {:ok, block_data} ->
                     {:ok, {index, block_data}}
@@ -267,12 +305,20 @@ defmodule MiniHadoop.Master.FileOperation do
                   case :file.write(file_handle, sorted_batch) do
                     :ok ->
                       new_count = processed_count + length(new_buffer)
-                      Common.FileTask.update_progress(task, new_count, num_blocks, "Processed #{new_count}/#{num_blocks} blocks")
+                      updated_task = Common.FileTask.update_progress(
+                        task,
+                        new_count,
+                        num_blocks,
+                        "Processed #{new_count}/#{num_blocks} blocks"
+                      )
+                      GenServer.cast(__MODULE__, {:update_operation, task.id, updated_task})
                       # Reset buffer and continue
                       {:cont, {:ok, [], new_count}}
 
                     {:error, reason} ->
                       IO.inspect("Error writing batch: #{reason}")
+                      failed_task = Common.FileTask.mark_failed(task, :write_error, "Failed to write batch: #{inspect(reason)}")
+                      GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
                       {:halt, {:error, {:write_failed, reason}}}
                   end
                 else
@@ -281,6 +327,8 @@ defmodule MiniHadoop.Master.FileOperation do
                 end
 
               {:error, {block_id, reason}}, _acc ->
+                failed_task = Common.FileTask.mark_failed(task, reason, "Failed to retrieve block #{block_id}: #{inspect(reason)}")
+                GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
                 {:halt, {:error, {block_id, reason}}}
             end)
 
@@ -316,104 +364,180 @@ defmodule MiniHadoop.Master.FileOperation do
           case final_result do
             {:ok, processed_count} ->
               if processed_count == num_blocks do
-                Common.FileTask.mark_completed(task, "File reconstructed successfully: #{default_path}")
+                # Final update progress
+                task_with_final_progress = Common.FileTask.update_progress(
+                  task,
+                  num_blocks,
+                  num_blocks,
+                  "All #{num_blocks} blocks retrieved successfully"
+                )
+
+                completed_task = Common.FileTask.mark_completed(task, "File reconstructed successfully: #{default_path}")
+                GenServer.cast(__MODULE__, {:update_operation, task.id, completed_task})
+                completed_task
               else
                 # Partial success - some blocks might have been written
-                Common.FileTask.mark_completed(task, "File partially reconstructed (#{processed_count}/#{num_blocks} blocks): #{default_path}")
+                completed_task = Common.FileTask.mark_completed(task, "File partially reconstructed (#{processed_count}/#{num_blocks} blocks): #{default_path}")
+                GenServer.cast(__MODULE__, {:update_operation, task.id, completed_task})
+                completed_task
               end
-
 
             {:error, {:write_failed, reason}} ->
               # Clean up partial file on write error
               File.rm(default_path)
-              Common.FileTask.mark_failed(
+              failed_task = Common.FileTask.mark_failed(
                 task,
                 reason,
                 "Failed to write file: #{inspect(reason)}"
               )
-          end
+              GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
+              failed_task
 
+            {:error, {block_id, reason}} ->
+              # Clean up partial file on retrieval error
+              File.rm(default_path)
+              failed_task = Common.FileTask.mark_failed(
+                task,
+                reason,
+                "Failed to retrieve block #{block_id}: #{inspect(reason)}"
+              )
+              GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
+              failed_task
+          end
         end
 
       {:error, :file_not_found} ->
-        Common.FileTask.mark_failed(task, :file_not_found, "File not found : #{inspect(task.filename)}")
+        failed_task = Common.FileTask.mark_failed(task, :file_not_found, "File not found: #{task.filename}")
+        GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
+        failed_task
 
       {:error, reason} ->
-        Common.FileTask.mark_failed(task, reason, "Failed to find blocks: #{inspect(reason)}")
+        failed_task = Common.FileTask.mark_failed(task, reason, "Failed to find blocks: #{inspect(reason)}")
+        GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
+        failed_task
     end
   end
 
   defp execute_delete_operation(task) do
+    task = Common.FileTask.mark_running(task, "Finding blocks for file deletion")
+    GenServer.cast(__MODULE__, {:update_operation, task.id, task})
+
     case MiniHadoop.Master.MasterNode.get_blocks_assingment_for_file(task.filename) do
       {:ok, blocks_with_owners} ->
         num_blocks = length(blocks_with_owners) * @replication_factor
 
         if num_blocks == 0 do
-          Common.FileTask.mark_completed(task, "No blocks found for file: #{task.filename}")
+          completed_task = Common.FileTask.mark_completed(task, "No blocks found for file: #{task.filename}")
+          GenServer.cast(__MODULE__, {:update_operation, task.id, completed_task})
+          completed_task
         else
           task = Common.FileTask.update_progress(task, 0, num_blocks, "Deleting #{num_blocks} blocks")
+          GenServer.cast(__MODULE__, {:update_operation, task.id, task})
 
           result =
             blocks_with_owners
-            |> Task.async_stream(
-              fn {_index, block_id, worker_pids} ->
+            |> Stream.chunk_every(@batch_size)  # Process in batches
+            |> Enum.reduce_while({:ok, 0}, fn chunk, {status, processed_count} ->
+              case status do
+                {:error, _} -> {:halt, {status, processed_count}}
+                _ ->
+                  # Process current chunk
+                  chunk_result =
+                    chunk
+                    |> Task.async_stream(
+                      fn {_index, block_id, worker_pids} ->
+                        {failed_deletion, success_count} =
+                          Enum.reduce_while(worker_pids, {nil, 0}, fn worker_pid, {failed, success_count} ->
+                            case GenServer.call(worker_pid, {:delete_block, block_id}, @default_timeout) do
+                              {operation, updated_worker_state} when operation in [:store, :delete] ->
+                                MasterNode.update_tree({operation, updated_worker_state})
+                                {:cont, {failed, success_count + 1}}
+                              {:error, reason} ->
+                                {:halt, {{block_id, reason}, success_count}}
+                              unexpected ->
+                                {:halt, {{block_id, {:unexpected_response, unexpected}}, success_count}}
+                            end
+                          end)
 
-                {failed_deletion, _} =
-                  Enum.reduce_while(worker_pids, {nil, 0}, fn worker_pid, {failed, success_count} ->
-                    case GenServer.call(worker_pid, {:delete_block, block_id}, @default_timeout) do
-                      {operation, updated_worker_state} when operation in [:store, :delete] ->
-                        MasterNode.update_tree({operation, updated_worker_state})
-                        {:cont, {failed, success_count + 1}}
-                      {:error, reason} ->
-                        {:halt, {{block_id, reason}, success_count}}
-                      unexpected ->
-                        {:halt, {{block_id, {:unexpected_response, unexpected}}, success_count}}
-                    end
-                  end)
+                        case failed_deletion do
+                          nil -> {:ok, block_id}
+                          error -> {:error, error}
+                        end
+                      end,
+                      max_concurrency: 10_000,
+                      ordered: false,
+                      timeout: :infinity
+                    )
+                    |> Enum.reduce_while({:ok, []}, fn
+                      {:ok, {:ok, block_id}}, {:ok, acc} -> {:cont, {:ok, [block_id | acc]}}
+                      {:ok, {:error, reason}}, _acc -> {:halt, {:error, reason}}
+                      {:exit, reason}, _acc -> {:halt, {:error, reason}}
+                    end)
 
-                case failed_deletion do
-                  nil -> {:ok, block_id}
-                  error -> {:error, error}
-                end
-              end,
-              max_concurrency: 10_000,
-              ordered: false,
-              timeout: :infinity
-            )
-            |> Enum.reduce_while(:ok, fn
-              {:ok, _block_id}, acc ->
-                {:cont, acc}
-              {:error, {block_id, reason}}, _acc ->
-                {:halt, {:error, {block_id, reason}}}
+                  case chunk_result do
+                    {:ok, _deleted_blocks} ->
+                      # Update progress after each chunk
+                      new_processed_count = processed_count + (length(chunk) * @replication_factor)
+                      updated_task = Common.FileTask.update_progress(
+                        task,
+                        new_processed_count,
+                        num_blocks,
+                        "Processed #{new_processed_count}/#{num_blocks} operations"
+                      )
+
+                      # Send async update
+                      GenServer.cast(__MODULE__, {:update_operation, task.id, updated_task})
+
+                      {:cont, {:ok, new_processed_count}}
+
+                    {:error, reason} ->
+                      # Send final error state
+                      failed_task = Common.FileTask.mark_failed(task, reason, "Failed: #{inspect(reason)}")
+                      GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
+                      {:halt, {{:error, reason}, processed_count}}
+                  end
+              end
             end)
+
           # Handle final result
           case result do
-            :ok ->
+            {{:error, reason}, _processed_count} ->
+              # Already sent error state above
+              {:error, reason}
+
+            {:ok, final_processed} ->
+              # Final cleanup and progress update
               MasterNode.rebuild_tree_after_deletion()
               MasterNode.unregister_file_blocks(task.filename)
-              Common.FileTask.update_progress(
+
+              # Final progress update to 100%
+              task_with_final_progress = Common.FileTask.update_progress(
                 task,
                 num_blocks,
                 num_blocks,
-                "All blocks deleted successfully"
+                "All #{num_blocks} blocks deleted successfully"
               )
-              |> Common.FileTask.mark_completed("All #{num_blocks} blocks deleted successfully")
 
-
-            {:error, {block_id, reason}} ->
-              Common.FileTask.mark_failed(
-                task,
-                reason,
-                "Failed to delete block #{block_id}: #{inspect(reason)}"
+              completed_task = Common.FileTask.mark_completed(
+                task_with_final_progress,
+                "All #{num_blocks} blocks deleted successfully"
               )
+
+              GenServer.cast(__MODULE__, {:update_operation, task.id, completed_task})
+              {:ok, completed_task}
           end
         end
 
       {:error, :file_not_found} ->
-        Common.FileTask.mark_failed(task, :file_not_found, "File not found : #{inspect(task.filename)}")
+        failed_task = Common.FileTask.mark_failed(task, :file_not_found, "File not found: #{task.filename}")
+        GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
+        failed_task
 
       {:error, reason} ->
-        Common.FileTask.mark_failed(task, reason, "Failed to find blocks: #{inspect(reason)}")
+        failed_task = Common.FileTask.mark_failed(task, reason, "Failed to find blocks: #{inspect(reason)}")
+        GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
+        failed_task
     end
   end
+
 end
