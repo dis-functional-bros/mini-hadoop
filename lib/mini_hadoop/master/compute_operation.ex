@@ -41,7 +41,7 @@ defmodule MiniHadoop.Master.ComputeOperation do
   end
 
   def init(opts) do
-    max_concurrent_jobs = opts[:max_concurrent_jobs] || 3
+    max_concurrent_jobs = opts[:max_concurrent_jobs] || 1
 
     state = %__MODULE__{
       job_specs: %{},
@@ -72,6 +72,10 @@ defmodule MiniHadoop.Master.ComputeOperation do
     GenServer.call(__MODULE__, {:register_worker, worker_pid})
   end
 
+  def get_workers do
+    GenServer.call(__MODULE__, :get_workers)
+  end
+
   def get_job_status(job_id) do
     GenServer.call(__MODULE__, {:get_job_status, job_id})
   end
@@ -91,6 +95,10 @@ defmodule MiniHadoop.Master.ComputeOperation do
   # GenServer Handlers
   def handle_call({:register_worker, worker_pid}, _from, state) do
     {:reply, :ok, %{state | workers: [worker_pid | state.workers]}}
+  end
+
+  def handle_call(:get_workers, _from, state) do
+    {:reply, state.workers, state}
   end
 
   def handle_call({:submit_job, job_attrs}, _from, state) do

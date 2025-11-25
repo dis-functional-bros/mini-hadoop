@@ -15,9 +15,10 @@ defmodule MiniHadoop.Worker.WorkerNode do
     :path,
     :master,
     :last_heartbeat,
-    registration_attempts: 0,
-    blocks_count: 0,
-    blocks: %{}
+    :registration_attempts,
+    :blocks_count,
+    :blocks,
+    :task_runner_pid
   ]
 
   def start_link(args) do
@@ -28,17 +29,36 @@ defmodule MiniHadoop.Worker.WorkerNode do
     default_path = args[:path] || "/app/MiniHadoop/data/"
     :ok = File.mkdir_p(default_path)
 
+    # Start TaskRunner - provide default if nil
+     max_tasks = args[:max_concurrent_compute_tasks] || 4
+     {:ok, task_runner_pid} = MiniHadoop.ComputeTask.TaskRunner.start_link([
+       max_concurrent_compute_tasks: max_tasks,
+       worker_node_pid: self()
+     ])
+
+
     state = %__MODULE__{
       pid: self(),
       hostname: Node.self(),
       status: :online,
       running_task: nil,
       master: args[:master],
-      path: default_path
+      path: default_path,
+      registration_attempts: 0,
+      blocks_count: 0,
+      blocks: %{},
+      task_runner_pid: task_runner_pid,
     }
 
     Process.send_after(self(), :register_master, @register_timeout)
     {:ok, state}
+  end
+
+  # Add the missing handle_cast
+  def handle_cast({:execute_task, task}, state) do
+    Logger.info("Worker routing task: #{task.task_id} to TaskRunner")
+    GenServer.cast(state.task_runner_pid, {:execute_task, task})
+    {:noreply, state}
   end
 
   def handle_info(:register_master, %{registration_attempts: attempts} = state)
@@ -46,6 +66,7 @@ defmodule MiniHadoop.Worker.WorkerNode do
     Logger.error("Worker #{state.hostname} failed to register after #{@max_retries} attempts.")
     {:stop, :registration_failed, state}
   end
+
 
   def handle_info(:register_master, state) do
     try do

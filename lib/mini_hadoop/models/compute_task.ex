@@ -16,6 +16,7 @@ defmodule MiniHadoop.Models.ComputeTask do
   defstruct [
     :task_id,
     :job_id,
+    :job_ref,
     :type,
     :status,
     :input_data,  # For map: {block_id=>worker_pid}, for reduce: list of intermediate key-value pairs
@@ -30,6 +31,7 @@ defmodule MiniHadoop.Models.ComputeTask do
   @type t :: %__MODULE__{
           task_id: String.t(),
           job_id: String.t(),
+          job_ref: pid(),
           type: task_type(),
           status: task_status(),
           input_data: any(),
@@ -53,26 +55,29 @@ defmodule MiniHadoop.Models.ComputeTask do
     struct(__MODULE__, Map.merge(defaults, Map.new(attrs)))
   end
 
-  @spec new_map(String.t(), any(), map_function()) :: t()
-  def new_map(job_id, input_data, map_function) do
+  # Change spec from map to tuple
+  @spec new_map(String.t(), {String.t(), [pid()]}, map_function(), pid()) :: t()
+  def new_map(job_id, block_info, map_function, job_ref) do
     task_id = "map_#{job_id}_#{generate_id()}"
 
     new(%{
       task_id: task_id,
       job_id: job_id,
       type: :map,
-      input_data: input_data,
-      function: map_function
+      input_data: block_info,  # This will now be a tuple
+      function: map_function,
+      job_ref: job_ref
     })
   end
 
-  @spec new_reduce(String.t(), key(), any(), reduce_function()) :: t()
-  def new_reduce(job_id, key, input_data, reduce_function) do
+  @spec new_reduce(String.t(), key(), [{String.t(), [pid()]}], reduce_function(), pid()) :: t()
+  def new_reduce(job_id, key, input_data, reduce_function, job_ref) do
     task_id = "red_#{job_id}_#{generate_id()}"
 
     new(%{
       task_id: task_id,
       job_id: job_id,
+      job_ref: job_ref,
       type: :reduce,
       key: key,
       input_data: input_data,

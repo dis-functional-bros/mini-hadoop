@@ -79,7 +79,7 @@ defmodule MiniHadoop.Models.JobSpec do
   end
 
   defp generate_id do
-    :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+    :crypto.strong_rand_bytes(2) |> Base.encode16(case: :lower)
   end
 
   defp validate_functions(attrs) do

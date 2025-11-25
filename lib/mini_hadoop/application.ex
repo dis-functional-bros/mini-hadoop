@@ -27,8 +27,7 @@ defmodule MiniHadoop.Application do
 
           [
             {Task.Supervisor, name: MiniHadoop.ComputeTask.TaskSupervisor},
-            {MiniHadoop.Worker.WorkerNode, [master: master_node]},
-            {MiniHadoop.ComputeTask.TaskRunner, [max_concurrent_compute_tasks: 4]},
+            {MiniHadoop.Worker.WorkerNode, [master: master_node, max_concurrent_compute_tasks: 4]},
           ]
 
         _ ->
