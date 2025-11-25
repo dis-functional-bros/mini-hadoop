@@ -16,15 +16,19 @@ defmodule MiniHadoop.Application do
           Logger.info("Starting MASTER Node : #{Node.self()}")
 
           [
+            {DynamicSupervisor, strategy: :one_for_one, name: MiniHadoop.Job.JobSupervisor},
             MiniHadoop.Master.MasterNode,
-            MiniHadoop.Master.FileOperation
+            MiniHadoop.Master.FileOperation,
+            {MiniHadoop.Master.ComputeOperation, [max_concurrent_jobs: 1]},
           ]
 
         "worker" ->
           Logger.info("Starting WORKER Node : #{Node.self()}")
 
           [
-            {MiniHadoop.Worker.WorkerNode, [master: master_node]}
+            {Task.Supervisor, name: MiniHadoop.ComputeTask.TaskSupervisor},
+            {MiniHadoop.Worker.WorkerNode, [master: master_node]},
+            {MiniHadoop.ComputeTask.TaskRunner, [max_concurrent_compute_tasks: 4]},
           ]
 
         _ ->

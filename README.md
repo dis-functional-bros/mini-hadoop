@@ -1,21 +1,20 @@
 # MiniHadoop DFS
 
-Sebuah Distributed File System (DFS) yang terinspirasi dari Hadoop, dikembangkan menggunakan Elixir sebagai bagian dari tugas mini project mata kuliah _Pemrograman Fungsional_.
+Sebuah Distributed File System (DFS) yang terinspirasi dari Hadoop, dikembangkan menggunakan Elixir sebagai bagian dari tugas mini project mata kuliah *Pemrograman Fungsional*.
 
 ## 🎯 Fitur Utama
 
 - **Distributed Storage**: Berkas (file) dipecah menjadi blok dan didistribusikan ke beberapa DataNode.
-- **Data Replication**: Setiap blok direplikasi ke sejumlah node untuk meningkatkan _fault tolerance_.
+- **Data Replication**: Setiap blok direplikasi ke sejumlah node untuk meningkatkan *fault tolerance*.
 - **Fault Tolerance**: Sistem tetap dapat beroperasi meskipun terjadi kegagalan pada beberapa DataNode.
 - **MapReduce Framework**: Mendukung pemrosesan data terdistribusi menggunakan model MapReduce.
-- **Functional Programming**: Memanfaatkan prinsip pemrograman fungsional untuk meningkatkan reliabilitas dan _maintainability_.
+- **Functional Programming**: Memanfaatkan prinsip pemrograman fungsional untuk meningkatkan reliabilitas dan *maintainability*.
 
 ## 🏗️ Arsitektur Sistem
 
 ### Model Master–Slave
 
 - **NameNode (Master)**:
-
   - Mengelola metadata sistem berkas.
   - Melacak lokasi setiap blok yang tersimpan pada DataNode.
   - Mengoordinasikan operasi berkas dan tugas MapReduce.
@@ -23,12 +22,12 @@ Sebuah Distributed File System (DFS) yang terinspirasi dari Hadoop, dikembangkan
 - **DataNode + TaskTracker (Slave)**:
   - Menyimpan blok data pada penyimpanan lokal.
   - Menjalankan tugas MapReduce.
-  - Mengirimkan _heartbeat_ ke NameNode sebagai indikator status node.
+  - Mengirimkan *heartbeat* ke NameNode sebagai indikator status node.
 
 ### Komponen MapReduce
 
 - **JobTracker**: Mengelola pengajuan pekerjaan dan penjadwalan tugas.
-- **TaskTracker**: Mengeksekusi _map tasks_ dan _reduce tasks_.
+- **TaskTracker**: Mengeksekusi *map tasks* dan *reduce tasks*.
 - **Pluggable Processing**: Pengguna dapat mendefinisikan fungsi map dan reduce sendiri.
 
 ## 🚀 Panduan Penggunaan
@@ -51,7 +50,6 @@ docker-compose up -d
 ### 3. Pengujian Cluster
 
 Enter MasterNode interactive shell
-
 ```bash
 docker exec -it mini_hadoop_master iex --name console@master.node --cookie mini_hadoop_secret_cookie --remsh master@master.node
 ```
@@ -61,8 +59,17 @@ docker exec -it mini_hadoop_master iex --name console@master.node --cookie mini_
 ### Operasi Berkas Dasar
 
 ```elixir
-MiniHadoop.Client.store_file("document.txt", "./document.txt")
+# old
+MiniHadoop.Client.store_file("document.txt", "Isi dokumen")
 {:ok, content} = MiniHadoop.Client.read_file("document.txt")
+files = MiniHadoop.Client.list_files()
+MiniHadoop.Client.delete_file("document.txt")
+
+
+# new 
+{:ok, op_id } = MiniHadoop.Client.submit_store_file("document.txt", "Isi dokumen")
+
+{:ok, content} = MiniHadoop.Client.submit_read_file("document.txt")
 files = MiniHadoop.Client.list_files()
 MiniHadoop.Client.delete_file("document.txt")
 ```

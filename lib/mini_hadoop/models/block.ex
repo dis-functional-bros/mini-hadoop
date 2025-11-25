@@ -1,4 +1,4 @@
-defmodule MiniHadoop.Common.Block do
+defmodule MiniHadoop.Models.Block do
   @moduledoc """
   Block operations and utilities for the distributed file system.
   Now simplified for fixed-size streaming chunks.

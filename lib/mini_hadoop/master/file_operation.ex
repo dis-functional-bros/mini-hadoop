@@ -1,7 +1,8 @@
 defmodule MiniHadoop.Master.FileOperation do
   use GenServer
   require Logger
-  alias MiniHadoop.Common
+  alias MiniHadoop.Models.FileTask
+  alias MiniHadoop.Models.Block
   alias MiniHadoop.Master.MasterNode
 
   @default_timeout 3_000_000
@@ -82,13 +83,13 @@ defmodule MiniHadoop.Master.FileOperation do
   defp create_and_start_operation(type, filename, file_path, state) do
     operation_id = "#{type}_#{state.next_id}"
 
-    task = Common.FileTask.new(%{
+    task = FileTask.new(%{
       id: operation_id,
       type: type,
       filename: filename,
       file_path: file_path
     })
-    |> Common.FileTask.mark_started("Initializing #{type} operation")
+    |> FileTask.mark_started("Initializing #{type} operation")
 
     new_state = %{
       state
@@ -118,13 +119,13 @@ defmodule MiniHadoop.Master.FileOperation do
   # ---------------------
   # Task execution stubs
   defp execute_store_operation(task) do
-    task = Common.FileTask.mark_running(task, "Calculating file size")
+    task = FileTask.mark_running(task, "Calculating file size")
     file_size = File.stat!(task.file_path).size
-    num_blocks = Common.Block.calculate_num_blocks(file_size)
+    num_blocks = Block.calculate_num_blocks(file_size)
     total_operations = num_blocks * @replication_factor
 
-    task = Common.FileTask.update_progress(task, 0, total_operations, "Allocating blocks")
-    block_size = Common.Block.get_block_size()
+    task = FileTask.update_progress(task, 0, total_operations, "Allocating blocks")
+    block_size = Block.get_block_size()
     IO.puts("Number of blocks: #{num_blocks}")
 
     # Send initial state update via cast (async)
@@ -189,7 +190,7 @@ defmodule MiniHadoop.Master.FileOperation do
 
                   # Update progress after each chunk
                   new_processed_count = processed_count + (length(chunk) * @replication_factor)
-                  updated_task = Common.FileTask.update_progress(
+                  updated_task = FileTask.update_progress(
                     task,
                     new_processed_count,
                     total_operations,
@@ -204,7 +205,7 @@ defmodule MiniHadoop.Master.FileOperation do
 
                 {:error, reason} ->
                   # Send final error state
-                  failed_task = Common.FileTask.mark_failed(task, reason, "Failed: #{inspect(reason)}")
+                  failed_task = FileTask.mark_failed(task, reason, "Failed: #{inspect(reason)}")
                   GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
                   {:halt, {{:error, reason}, acc_blocks, processed_count}}
               end
@@ -228,14 +229,14 @@ defmodule MiniHadoop.Master.FileOperation do
         sorted_block_ids = Enum.map(sorted_block_ids_with_index, fn {_index, block_id} -> block_id end)
 
         # Final progress update to 100%
-        task_with_final_progress = Common.FileTask.update_progress(
+        task_with_final_progress = FileTask.update_progress(
           task,
           total_operations,
           total_operations,
           "All #{total_operations} blocks stored successfully"
         )
 
-        completed_task = Common.FileTask.mark_completed(
+        completed_task = FileTask.mark_completed(
           task_with_final_progress,
           "All #{total_operations} blocks stored successfully"
         )
@@ -249,7 +250,7 @@ defmodule MiniHadoop.Master.FileOperation do
   end
 
   defp execute_retrieve_operation(task) do
-    task = Common.FileTask.mark_running(task, "Finding blocks for file")
+    task = FileTask.mark_running(task, "Finding blocks for file")
     GenServer.cast(__MODULE__, {:update_operation, task.id, task})
 
     case MiniHadoop.Master.MasterNode.get_blocks_assingment_for_file(task.filename) do
@@ -257,11 +258,11 @@ defmodule MiniHadoop.Master.FileOperation do
         num_blocks = length(blocks_with_owners)
 
         if num_blocks == 0 do
-          failed_task = Common.FileTask.mark_failed(task, :file_not_found, "No blocks found for file: #{task.filename}")
+          failed_task = FileTask.mark_failed(task, :file_not_found, "No blocks found for file: #{task.filename}")
           GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
           failed_task
         else
-          task = Common.FileTask.update_progress(task, 0, num_blocks, "Retrieving #{num_blocks} blocks")
+          task = FileTask.update_progress(task, 0, num_blocks, "Retrieving #{num_blocks} blocks")
           GenServer.cast(__MODULE__, {:update_operation, task.id, task})
 
           # Create output file path
@@ -305,7 +306,7 @@ defmodule MiniHadoop.Master.FileOperation do
                   case :file.write(file_handle, sorted_batch) do
                     :ok ->
                       new_count = processed_count + length(new_buffer)
-                      updated_task = Common.FileTask.update_progress(
+                      updated_task = FileTask.update_progress(
                         task,
                         new_count,
                         num_blocks,
@@ -317,7 +318,7 @@ defmodule MiniHadoop.Master.FileOperation do
 
                     {:error, reason} ->
                       IO.inspect("Error writing batch: #{reason}")
-                      failed_task = Common.FileTask.mark_failed(task, :write_error, "Failed to write batch: #{inspect(reason)}")
+                      failed_task = FileTask.mark_failed(task, :write_error, "Failed to write batch: #{inspect(reason)}")
                       GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
                       {:halt, {:error, {:write_failed, reason}}}
                   end
@@ -327,7 +328,7 @@ defmodule MiniHadoop.Master.FileOperation do
                 end
 
               {:error, {block_id, reason}}, _acc ->
-                failed_task = Common.FileTask.mark_failed(task, reason, "Failed to retrieve block #{block_id}: #{inspect(reason)}")
+                failed_task = FileTask.mark_failed(task, reason, "Failed to retrieve block #{block_id}: #{inspect(reason)}")
                 GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
                 {:halt, {:error, {block_id, reason}}}
             end)
@@ -365,19 +366,19 @@ defmodule MiniHadoop.Master.FileOperation do
             {:ok, processed_count} ->
               if processed_count == num_blocks do
                 # Final update progress
-                task_with_final_progress = Common.FileTask.update_progress(
+                task_with_final_progress = FileTask.update_progress(
                   task,
                   num_blocks,
                   num_blocks,
                   "All #{num_blocks} blocks retrieved successfully"
                 )
 
-                completed_task = Common.FileTask.mark_completed(task, "File reconstructed successfully: #{default_path}")
+                completed_task = FileTask.mark_completed(task, "File reconstructed successfully: #{default_path}")
                 GenServer.cast(__MODULE__, {:update_operation, task.id, completed_task})
                 completed_task
               else
                 # Partial success - some blocks might have been written
-                completed_task = Common.FileTask.mark_completed(task, "File partially reconstructed (#{processed_count}/#{num_blocks} blocks): #{default_path}")
+                completed_task = FileTask.mark_completed(task, "File partially reconstructed (#{processed_count}/#{num_blocks} blocks): #{default_path}")
                 GenServer.cast(__MODULE__, {:update_operation, task.id, completed_task})
                 completed_task
               end
@@ -385,7 +386,7 @@ defmodule MiniHadoop.Master.FileOperation do
             {:error, {:write_failed, reason}} ->
               # Clean up partial file on write error
               File.rm(default_path)
-              failed_task = Common.FileTask.mark_failed(
+              failed_task = FileTask.mark_failed(
                 task,
                 reason,
                 "Failed to write file: #{inspect(reason)}"
@@ -396,7 +397,7 @@ defmodule MiniHadoop.Master.FileOperation do
             {:error, {block_id, reason}} ->
               # Clean up partial file on retrieval error
               File.rm(default_path)
-              failed_task = Common.FileTask.mark_failed(
+              failed_task = FileTask.mark_failed(
                 task,
                 reason,
                 "Failed to retrieve block #{block_id}: #{inspect(reason)}"
@@ -407,19 +408,19 @@ defmodule MiniHadoop.Master.FileOperation do
         end
 
       {:error, :file_not_found} ->
-        failed_task = Common.FileTask.mark_failed(task, :file_not_found, "File not found: #{task.filename}")
+        failed_task = FileTask.mark_failed(task, :file_not_found, "File not found: #{task.filename}")
         GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
         failed_task
 
       {:error, reason} ->
-        failed_task = Common.FileTask.mark_failed(task, reason, "Failed to find blocks: #{inspect(reason)}")
+        failed_task = FileTask.mark_failed(task, reason, "Failed to find blocks: #{inspect(reason)}")
         GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
         failed_task
     end
   end
 
   defp execute_delete_operation(task) do
-    task = Common.FileTask.mark_running(task, "Finding blocks for file deletion")
+    task = FileTask.mark_running(task, "Finding blocks for file deletion")
     GenServer.cast(__MODULE__, {:update_operation, task.id, task})
 
     case MiniHadoop.Master.MasterNode.get_blocks_assingment_for_file(task.filename) do
@@ -427,11 +428,11 @@ defmodule MiniHadoop.Master.FileOperation do
         num_blocks = length(blocks_with_owners) * @replication_factor
 
         if num_blocks == 0 do
-          completed_task = Common.FileTask.mark_completed(task, "No blocks found for file: #{task.filename}")
+          completed_task = FileTask.mark_completed(task, "No blocks found for file: #{task.filename}")
           GenServer.cast(__MODULE__, {:update_operation, task.id, completed_task})
           completed_task
         else
-          task = Common.FileTask.update_progress(task, 0, num_blocks, "Deleting #{num_blocks} blocks")
+          task = FileTask.update_progress(task, 0, num_blocks, "Deleting #{num_blocks} blocks")
           GenServer.cast(__MODULE__, {:update_operation, task.id, task})
 
           result =
@@ -478,7 +479,7 @@ defmodule MiniHadoop.Master.FileOperation do
                     {:ok, _deleted_blocks} ->
                       # Update progress after each chunk
                       new_processed_count = processed_count + (length(chunk) * @replication_factor)
-                      updated_task = Common.FileTask.update_progress(
+                      updated_task = FileTask.update_progress(
                         task,
                         new_processed_count,
                         num_blocks,
@@ -492,7 +493,7 @@ defmodule MiniHadoop.Master.FileOperation do
 
                     {:error, reason} ->
                       # Send final error state
-                      failed_task = Common.FileTask.mark_failed(task, reason, "Failed: #{inspect(reason)}")
+                      failed_task = FileTask.mark_failed(task, reason, "Failed: #{inspect(reason)}")
                       GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
                       {:halt, {{:error, reason}, processed_count}}
                   end
@@ -511,14 +512,14 @@ defmodule MiniHadoop.Master.FileOperation do
               MasterNode.unregister_file_blocks(task.filename)
 
               # Final progress update to 100%
-              task_with_final_progress = Common.FileTask.update_progress(
+              task_with_final_progress = FileTask.update_progress(
                 task,
                 num_blocks,
                 num_blocks,
                 "All #{num_blocks} blocks deleted successfully"
               )
 
-              completed_task = Common.FileTask.mark_completed(
+              completed_task = FileTask.mark_completed(
                 task_with_final_progress,
                 "All #{num_blocks} blocks deleted successfully"
               )
@@ -529,12 +530,12 @@ defmodule MiniHadoop.Master.FileOperation do
         end
 
       {:error, :file_not_found} ->
-        failed_task = Common.FileTask.mark_failed(task, :file_not_found, "File not found: #{task.filename}")
+        failed_task = FileTask.mark_failed(task, :file_not_found, "File not found: #{task.filename}")
         GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
         failed_task
 
       {:error, reason} ->
-        failed_task = Common.FileTask.mark_failed(task, reason, "Failed to find blocks: #{inspect(reason)}")
+        failed_task = FileTask.mark_failed(task, reason, "Failed to find blocks: #{inspect(reason)}")
         GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
         failed_task
     end

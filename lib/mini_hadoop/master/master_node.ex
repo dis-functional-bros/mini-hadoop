@@ -2,6 +2,8 @@ defmodule MiniHadoop.Master.MasterNode do
   use GenServer
   require Logger
 
+  alias MiniHadoop.Master.ComputeOperation
+
 
   def start_link(args \\ %{}) do
     GenServer.start_link(__MODULE__, args, name: __MODULE__)
@@ -21,6 +23,10 @@ defmodule MiniHadoop.Master.MasterNode do
 
   def filename_exists(filename) when is_binary(filename) do
     GenServer.call(__MODULE__, {:filename_exists, filename})
+  end
+
+  def fetch_blocks_by_filenames(filenames) when is_list(filenames) do
+    GenServer.call(__MODULE__, {:fetch_blocks_by_filenames, filenames})
   end
 
   def get_blocks_assingment_for_file(filename) when is_binary(filename) do
@@ -69,6 +75,9 @@ defmodule MiniHadoop.Master.MasterNode do
         | last_heartbeat: :os.system_time(:millisecond)
       })
 
+    # register worker to compute_operation
+    ComputeOperation.register_worker(worker_state.pid)
+
     # Monitor worker process
     Process.monitor(worker_state.pid)
 
@@ -112,6 +121,17 @@ defmodule MiniHadoop.Master.MasterNode do
   @impl true
   def handle_call({:filename_exists, filename}, _from, state) do
     {:reply, Map.has_key?(state.filename_to_blocks, filename), state}
+  end
+
+  @impl true
+  def handle_call(:fetch_blocks_by_filenames, _from, state) do
+    result =
+      Enum.reduce(state.filename_to_blocks, %{}, fn {_, block_ids}, acc ->
+        Enum.reduce(block_ids, acc, fn block_id, acc ->
+          Map.put(acc, block_id, Map.get(state.block_to_worker_mapping, block_id, []))
+        end)
+      end)
+    {:reply, result, state}
   end
 
   @impl true

@@ -1,6 +1,7 @@
 defmodule MiniHadoop do
   require Logger
   alias MiniHadoop.Master.FileOperation
+  alias MiniHadoop.Master.ComputeOperation
 
   def store_file(filename, file_path) when is_binary(filename) and is_binary(file_path) do
     FileOperation.store_file(filename, file_path)
@@ -13,6 +14,17 @@ defmodule MiniHadoop do
   def delete_file(filename) when is_binary(filename) do
     FileOperation.delete_file(filename)
   end
+
+  def test_submit_job do
+    job = %{
+      input: ["test_input"],
+      output: "test_output",
+      map_function: fn x -> x * 2 end,
+      reduce_function: fn {x, y} -> x + y end
+    }
+    ComputeOperation.submit_job(job)
+  end
+
 
   @doc """
   Executes a Map function against a stored block.

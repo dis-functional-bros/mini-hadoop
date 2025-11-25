@@ -1,4 +1,4 @@
-defmodule MiniHadoop.Common.FileTask do
+defmodule MiniHadoop.Models.FileTask do
   @moduledoc """
   Simplified file task tracking with block-based progress.
   """
