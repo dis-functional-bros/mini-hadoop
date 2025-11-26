@@ -236,44 +236,38 @@ defmodule MiniHadoop.Job.JobRunner do
   end
 
   defp execute_shuffle_phase(state) do
-    Logger.info("Executing shuffle phase")
-
-    # Reset reduce phase counters
     :ets.insert(@ets_table, [
       {:completed_reduce_tasks, 0},
       {:failed_reduce_tasks, 0}
     ])
 
-    workers = ComputeOperation.get_workers()
     job_id = state.job.job_id
 
-    # 1. Fetch keys from all workers using get_intermediate_data
-    # Output: %{worker_pid => MapSet<keys>} or %{worker_pid => MapSet<[]>}
-    worker_keys_map =
-      Map.new(workers, fn worker_pid ->
-        keys =
+    shuffle_result =
+      ComputeOperation.get_workers()
+      # lazy
+      # Hasilnya sebelum flat_map:
+      # [
+      #  {:ok, [{"k1", #PID<0.1>}, {"k2", #PID<0.1>}]},
+      #  {:ok, [{"k2", #PID<0.2>}, {"k3", #PID<0.2>}]}
+      # ]
+      |> Task.async_stream(
+        fn worker_pid ->
           try do
             case GenServer.call(worker_pid, {:get_intermediate_data, job_id}, :infinity) do
-              {:ok, keys} -> MapSet.new(keys)
-              _ -> MapSet.new()
+              {:ok, keys} -> Enum.map(keys, fn key -> {key, worker_pid} end)
+              _ -> []
             end
           catch
-            :exit, _ -> MapSet.new()
+            :exit, _ -> []
           end
-
-        {worker_pid, keys}
-      end)
-
-    # 2. Transform to Output: [{"key", [pid(), pid()]}]
-    shuffle_result =
-      worker_keys_map
-      |> Enum.flat_map(fn {worker_pid, keys} ->
-        Enum.map(keys, fn key -> {key, worker_pid} end)
-      end)
-      |> Enum.group_by(fn {key, _pid} -> key end, fn {_key, pid} -> pid end)
+        end,
+        max_concurrency: 100,
+        timeout: :infinity
+      )
+      |> Enum.flat_map(fn {:ok, result} -> result end)
+      |> Enum.group_by(fn {key, _} -> key end, fn {_, pid} -> pid end)
       |> Enum.map(fn {key, pids} -> {key, Enum.uniq(pids)} end)
-
-    Logger.info("Shuffle completed. Keys found: #{length(shuffle_result)}")
 
     %{state | shuffle_data: shuffle_result, status: :shuffle_completed}
     |> execute_reduce_phase()

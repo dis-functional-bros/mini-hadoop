@@ -9,23 +9,30 @@ defmodule MiniHadoop.Master.ComputeOperation do
 
   defstruct [
     # Job Specifications (immutable definitions)
-    job_specs: %{},        # %{job_id => JobSpec.t()}
+    # %{job_id => JobSpec.t()}
+    job_specs: %{},
 
     # Job Executions (runtime state)
-    job_executions: %{},   # %{job_id => JobExecution.t()}
+    # %{job_id => JobExecution.t()}
+    job_executions: %{},
 
     # Process tracking
-    job_processes: %{},    # %{job_id => pid()}
+    # %{job_id => pid()}
+    job_processes: %{},
 
     # Worker management
-    workers: [],           # [worker_pid]
+    # [worker_pid]
+    workers: [],
 
     # Job queuing system
-    pending_jobs: :queue.new(),  # Queue of job_ids waiting to run
-    running_jobs: %{},           # %{job_id => %{started_at: DateTime.t()}}
+    # Queue of job_ids waiting to run
+    pending_jobs: :queue.new(),
+    # %{job_id => %{started_at: DateTime.t()}}
+    running_jobs: %{},
 
     # Concurrency control
-    max_concurrent_jobs: 1,      # Maximum jobs running simultaneously
+    # Maximum jobs running simultaneously
+    max_concurrent_jobs: 1,
 
     # System metrics
     metrics: %{
@@ -104,22 +111,28 @@ defmodule MiniHadoop.Master.ComputeOperation do
   def handle_call({:submit_job, job_attrs}, _from, state) do
     case JobSpec.new(job_attrs) do
       {:ok, job_spec} ->
-
         # Create job execution in pending state
         job_execution = JobExecution.new(job_spec.job_id, job_spec.num_reducers)
 
         # Store job spec and execution
-        state = %{state |
-          job_specs: Map.put(state.job_specs, job_spec.job_id, job_spec),
-          job_executions: Map.put(state.job_executions, job_spec.job_id, job_execution),
-          pending_jobs: :queue.in(job_spec.job_id, state.pending_jobs),
-          metrics: %{state.metrics | total_jobs_submitted: state.metrics.total_jobs_submitted + 1}
+        state = %{
+          state
+          | job_specs: Map.put(state.job_specs, job_spec.job_id, job_spec),
+            job_executions: Map.put(state.job_executions, job_spec.job_id, job_execution),
+            pending_jobs: :queue.in(job_spec.job_id, state.pending_jobs),
+            metrics: %{
+              state.metrics
+              | total_jobs_submitted: state.metrics.total_jobs_submitted + 1
+            }
         }
 
         # Try to start jobs if we have capacity
         state = start_pending_jobs(state)
 
-        Logger.info("Job #{job_spec.job_id} submitted. #{:queue.len(state.pending_jobs)} jobs pending")
+        Logger.info(
+          "Job #{job_spec.job_id} submitted. #{:queue.len(state.pending_jobs)} jobs pending"
+        )
+
         {:reply, {:ok, job_spec.job_id}, state}
 
       {:error, reason} ->
@@ -131,6 +144,7 @@ defmodule MiniHadoop.Master.ComputeOperation do
     case state.job_executions[job_id] do
       nil ->
         {:reply, {:error, :not_found}, state}
+
       job_execution ->
         {:reply, {:ok, job_execution}, state}
     end
@@ -154,6 +168,7 @@ defmodule MiniHadoop.Master.ComputeOperation do
       active_workers: length(state.workers),
       metrics: state.metrics
     }
+
     {:reply, status, state}
   end
 
@@ -161,25 +176,28 @@ defmodule MiniHadoop.Master.ComputeOperation do
   def handle_cast({:job_started, job_id}, state) do
     Logger.info("Job #{job_id} started execution")
 
-    state = update_in(state.job_executions[job_id], fn job_execution ->
-      JobExecution.mark_started(job_execution, state.job_processes[job_id])
-    end)
+    state =
+      update_in(state.job_executions[job_id], fn job_execution ->
+        JobExecution.mark_started(job_execution, state.job_processes[job_id])
+      end)
 
     {:noreply, state}
   end
 
   def handle_cast({:job_status, job_id, status}, state) do
-    state = update_in(state.job_executions[job_id], fn job_execution ->
-      %{job_execution | status: status}
-    end)
+    state =
+      update_in(state.job_executions[job_id], fn job_execution ->
+        %{job_execution | status: status}
+      end)
 
     {:noreply, state}
   end
 
   def handle_cast({:job_progress, job_id, phase, completed, total}, state) do
-    state = update_in(state.job_executions[job_id], fn job_execution ->
-      JobExecution.update_progress(job_execution, phase, completed, total)
-    end)
+    state =
+      update_in(state.job_executions[job_id], fn job_execution ->
+        JobExecution.update_progress(job_execution, phase, completed, total)
+      end)
 
     percentage = if total > 0, do: Float.round(completed / total * 100, 1), else: 0
     Logger.debug("Job #{job_id} #{phase}: #{completed}/#{total} (#{percentage}%)")
@@ -188,20 +206,22 @@ defmodule MiniHadoop.Master.ComputeOperation do
   end
 
   def handle_cast({:job_completed, job_id, results}, state) do
-
-    state = update_in(state.job_executions[job_id], fn job_execution ->
-      JobExecution.mark_completed(job_execution, results)
-    end)
+    state =
+      update_in(state.job_executions[job_id], fn job_execution ->
+        JobExecution.mark_completed(job_execution, results)
+      end)
 
     # Remove from running jobs and process tracking
-    state = %{state |
-      running_jobs: Map.delete(state.running_jobs, job_id),
-      job_processes: Map.delete(state.job_processes, job_id)
+    state = %{
+      state
+      | running_jobs: Map.delete(state.running_jobs, job_id),
+        job_processes: Map.delete(state.job_processes, job_id)
     }
 
     # Update metrics
-    state = %{state |
-      metrics: %{state.metrics | total_jobs_completed: state.metrics.total_jobs_completed + 1}
+    state = %{
+      state
+      | metrics: %{state.metrics | total_jobs_completed: state.metrics.total_jobs_completed + 1}
     }
 
     # Start next pending job
@@ -213,19 +233,22 @@ defmodule MiniHadoop.Master.ComputeOperation do
   def handle_cast({:job_failed, job_id, reason}, state) do
     Logger.error("Job #{job_id} failed: #{inspect(reason)}")
 
-    state = update_in(state.job_executions[job_id], fn job_execution ->
-      JobExecution.mark_failed(job_execution, reason)
-    end)
+    state =
+      update_in(state.job_executions[job_id], fn job_execution ->
+        JobExecution.mark_failed(job_execution, reason)
+      end)
 
     # Remove from running jobs and process tracking
-    state = %{state |
-      running_jobs: Map.delete(state.running_jobs, job_id),
-      job_processes: Map.delete(state.job_processes, job_id)
+    state = %{
+      state
+      | running_jobs: Map.delete(state.running_jobs, job_id),
+        job_processes: Map.delete(state.job_processes, job_id)
     }
 
     # Update metrics
-    state = %{state |
-      metrics: %{state.metrics | total_jobs_failed: state.metrics.total_jobs_failed + 1}
+    state = %{
+      state
+      | metrics: %{state.metrics | total_jobs_failed: state.metrics.total_jobs_failed + 1}
     }
 
     # Start next pending job
@@ -239,30 +262,36 @@ defmodule MiniHadoop.Master.ComputeOperation do
     # Find which job this PID belongs to
     case Enum.find(state.job_processes, fn {_job_id, job_pid} -> job_pid == pid end) do
       {job_id, _pid} ->
-        Logger.warn("Job #{job_id} process terminated unexpectedly: #{inspect(reason)}")
+        Logger.warning("Job #{job_id} process terminated unexpectedly: #{inspect(reason)}")
 
-        state = update_in(state.job_executions[job_id], fn job_execution ->
-          JobExecution.mark_failed(job_execution, :unexpected_termination)
-        end)
+        state =
+          update_in(state.job_executions[job_id], fn job_execution ->
+            JobExecution.mark_failed(job_execution, :unexpected_termination)
+          end)
 
-        state = %{state |
-          running_jobs: Map.delete(state.running_jobs, job_id),
-          job_processes: Map.delete(state.job_processes, job_id)
+        state = %{
+          state
+          | running_jobs: Map.delete(state.running_jobs, job_id),
+            job_processes: Map.delete(state.job_processes, job_id)
         }
 
         # Start next pending job
         state = start_pending_jobs(state)
         {:noreply, state}
+
       nil ->
-        {:noreply, state}  # Not one of our job processes
+        # Not one of our job processes
+        {:noreply, state}
     end
   end
 
   # Private functions
   defp start_pending_jobs(state) do
-    if (map_size(state.running_jobs) < state.max_concurrent_jobs) and not :queue.is_empty(state.pending_jobs) do
+    if map_size(state.running_jobs) < state.max_concurrent_jobs and
+         not :queue.is_empty(state.pending_jobs) do
       {{:value, job_id}, pending_jobs} = :queue.out(state.pending_jobs)
       state_with_updated_queue = %{state | pending_jobs: pending_jobs}
+
       case start_job_process(job_id, state_with_updated_queue) do
         {:ok, new_state} ->
           # Recursively start more jobs if capacity allows
@@ -284,16 +313,14 @@ defmodule MiniHadoop.Master.ComputeOperation do
     case JobSupervisor.start_job(job_spec) do
       {:ok, job_pid} ->
         # Track the running job
-        running_jobs = Map.put(state.running_jobs, job_id, %{
-          started_at: DateTime.utc_now()
-        })
+        running_jobs =
+          Map.put(state.running_jobs, job_id, %{
+            started_at: DateTime.utc_now()
+          })
 
         job_processes = Map.put(state.job_processes, job_id, job_pid)
 
-        state = %{state |
-          running_jobs: running_jobs,
-          job_processes: job_processes
-        }
+        state = %{state | running_jobs: running_jobs, job_processes: job_processes}
 
         {:ok, state}
 
