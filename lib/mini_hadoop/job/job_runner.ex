@@ -39,7 +39,7 @@ defmodule MiniHadoop.Job.JobRunner do
     {:ok, state}
   end
 
-  # Task Handler - detect task type from task_id prefix
+  # Task Handler
   def handle_info({:task_completed, task_id}, state) do
 
     if String.starts_with?(task_id, "red_") do

@@ -36,65 +36,56 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
     {:reply, status, state}
   end
 
-  def handle_cast({:execute_task, task}, state) do
-    state
-    |> maybe_execute_task(task)
-    |> then(fn new_state -> {:noreply, new_state} end)
-  end
+  # When: New task arrives AND we have capacity → Execute immediately
+   def handle_cast({:execute_task, task}, %{pending_tasks: queue} = state)
+     when :queue.is_empty(queue) and concurrent_tasks_under_limit?(state) do
+     {:noreply, execute_task_immediately(state, task)}
+   end
 
-  # Update the completion handler
-  def handle_info({task_ref, {ref, task, result}}, state) when is_reference(task_ref) do
-    # Clean up custom ref
-    :ets.delete(@task_refs_table, ref)
+   # When: New task arrives BUT we're at capacity → Queue it
+   def handle_cast({:execute_task, task}, state) do
+     {:noreply, queue_task(state, task)}
+   end
 
+   # When: Task completes successfully
+   def handle_info({task_ref, {ref, task, result}}, state) when is_reference(task_ref) do
+     :ets.delete(@task_refs_table, ref)
+     {:noreply, state |> handle_task_completion(ref, task, result)}
+   end
+
+   # When: Task fails with reason
+   def handle_info({:DOWN, ref, :process, _pid, reason}, state) when is_reference(ref) do
+     case :ets.lookup(@task_refs_table, ref) do
+       [{^ref, job_ref, task_id}] ->
+         :ets.delete(@task_refs_table, ref)
+         {:noreply, state |> handle_task_failure(job_ref, task_id, reason)}
+       [] ->
+         Logger.error("Task failure for unknown reference: #{inspect(reason)}")
+         {:noreply, state |> decrement_task_count() |> process_next_pending_task()}
+     end
+   end
+
+   # When: Normal process shutdown (ignore)
+   def handle_info({:DOWN, _ref, :process, _pid, :normal}, state) do
+     {:noreply, state}
+   end
+
+
+  # Private functional helpers
+
+  defp handle_task_completion(state, ref, task, result) do
     state
     |> decrement_task_count()
     |> save_result(task, result)
     |> notify_completion(task)
     |> process_next_pending_task()
-    |> then(fn new_state -> {:noreply, new_state} end)
   end
 
-  # Successful completion - ignore
-  def handle_info({:DOWN, ref, :process, _pid, :normal}, state) do
-    {:noreply, state}
-  end
-  # Task failure handler
-  def handle_info({:DOWN, ref, :process, _pid, reason}, state) when is_reference(ref) do
-    # Look up task info from ETS and notify failure
-    case :ets.lookup(@task_refs_table, ref) do
-      [{^ref, job_ref, task_id}] ->
-        # Clean up the reference tracking
-        :ets.delete(@task_refs_table, ref)
-
-        state
-        |> decrement_task_count()
-        |> notify_failure(job_ref, task_id, reason)
-        |> process_next_pending_task()
-
-      [] ->
-        # Unknown reference, just decrement counter
-        Logger.error("Task failure for unknown reference: #{inspect(reason)}")
-        state
-        |> decrement_task_count()
-        |> process_next_pending_task()
-    end
-    |> then(fn new_state -> {:noreply, new_state} end)
-  end
-
-  # # Process pending tasks when slots available
-  # def handle_info(:process_pending_tasks, state) do
-  #   {:noreply, process_next_pending_task(state)}
-  # end
-
-  # Private functional helpers
-
-  defp maybe_execute_task(state, task) do
-    if concurrent_tasks_under_limit?(state) do
-      execute_task_immediately(state, task)
-    else
-      queue_task(state, task)
-    end
+  defp handle_task_failure(state, job_ref, task_id, reason) do
+    state
+    |> decrement_task_count()
+    |> notify_failure(job_ref, task_id, reason)
+    |> process_next_pending_task()
   end
 
   defp execute_task_immediately(state, task) do

@@ -9,14 +9,14 @@ defmodule MiniHadoop.Job.JobSupervisor do
   # Public API
   @spec start_job(JobSpec.t()) ::
         {:ok, pid()} | {:error, term()}
-def start_job(job) do
-  child_spec = %{
-    id: MiniHadoop.Job.JobRunner,
-    start: {MiniHadoop.Job.JobRunner, :start_link, [job]},
-    restart: :temporary
-  }
-  DynamicSupervisor.start_child(__MODULE__, child_spec)
-end
+  def start_job(job) do
+    child_spec = %{
+      id: MiniHadoop.Job.JobRunner,
+      start: {MiniHadoop.Job.JobRunner, :start_link, [job]},
+      restart: :temporary
+    }
+    DynamicSupervisor.start_child(__MODULE__, child_spec)
+  end
 
   @spec stop_job(pid()) :: :ok | {:error, :not_found}
   def stop_job(pid) do
