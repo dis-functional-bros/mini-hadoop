@@ -4,6 +4,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
 
   @ets_table :task_runner_counters
   @task_refs_table :task_runner_refs
+  @max_queued_tasks 20
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts)
@@ -43,7 +44,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
 
   # Update the completion handler
   def handle_info({task_ref, {ref, task, result}}, state) when is_reference(task_ref) do
-    # Clean up our custom ref
+    # Clean up custom ref
     :ets.delete(@task_refs_table, ref)
 
     state
@@ -81,15 +82,15 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
     |> then(fn new_state -> {:noreply, new_state} end)
   end
 
-  # Process pending tasks when slots available
-  def handle_info(:process_pending_tasks, state) do
-    {:noreply, process_next_pending_task(state)}
-  end
+  # # Process pending tasks when slots available
+  # def handle_info(:process_pending_tasks, state) do
+  #   {:noreply, process_next_pending_task(state)}
+  # end
 
   # Private functional helpers
 
   defp maybe_execute_task(state, task) do
-    if can_accept_more_tasks?(state) do
+    if concurrent_tasks_under_limit?(state) do
       execute_task_immediately(state, task)
     else
       queue_task(state, task)
@@ -106,7 +107,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
     # Now start the task
     task_async = Task.Supervisor.async_nolink(MiniHadoop.ComputeTask.TaskSupervisor, fn ->
       result = execute_task_logic(task)
-      {ref, task, result}  # Include our custom ref in the result
+      {ref, task, result}
     end)
 
     state
@@ -165,7 +166,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
     %{"dummy": 6, "data": 4}
   end
 
-  defp can_accept_more_tasks?(state) do
+  defp concurrent_tasks_under_limit?(state) do
     [{:current_tasks, current}] = :ets.lookup(@ets_table, :current_tasks)
     current < state.max_concurrent_tasks
   end
@@ -205,7 +206,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
   end
 
   defp process_next_pending_task(state) do
-    if can_accept_more_tasks?(state) do
+    if concurrent_tasks_under_limit?(state) do
       case dequeue_task(state) do
         {task, new_state} when not is_nil(task) ->
           new_state

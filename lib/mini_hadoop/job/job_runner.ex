@@ -69,6 +69,14 @@ defmodule MiniHadoop.Job.JobRunner do
   end
 
   # Phase transition handler
+  def handle_info(:start_processing, state) do
+    Logger.info("Starting job processing")
+    new_state = state
+    |> notify_job_start()
+    |> execute_map_phase()
+    {:noreply, new_state}
+  end
+
   def handle_info(:proceed_to_shuffle, state) do
     Logger.info("Proceeding to shuffle phase")
     {:noreply, execute_shuffle_phase(state)}
@@ -172,7 +180,7 @@ defmodule MiniHadoop.Job.JobRunner do
     value
   end
 
-  # Job execution pipeline (simplified)
+  # Job execution pipeline
   defp execute_map_phase(state) do
     try do
       state
@@ -220,7 +228,7 @@ defmodule MiniHadoop.Job.JobRunner do
     #   worker_pid_3 =>#MapSet<["key1", "key3", "key2"]>
     # }
     #
-    # Output: [{"key", [(), pid()]}, {"key", [pid(), pid()]}, {"key", [pid(), pid()]}]
+    # Output: [{"key1", [worker_pid_1, worker_pid_2, worker_pid_3]}, {"key", [worker_pid_1, worker_pid_2, worker_pid_3]}, {"key", [worker_pid_1, worker_pid_2, worker_pid_3]}]
 
     # Generate dummy shuffle data
     workers_pids = ComputeOperation.get_workers()
@@ -319,6 +327,7 @@ defmodule MiniHadoop.Job.JobRunner do
 
   defp generate_reduce_tasks_for_job(job, shuffle_data) do
     # TODO real task generation
+    # %{key, key, key}
 
     shuffle_data
     |> Enum.map(fn {key, worker_pids} ->
@@ -333,7 +342,7 @@ defmodule MiniHadoop.Job.JobRunner do
 
   defp dispatch_tasks([], acc), do: acc
 
-  defp dispatch_tasks([task | remaining_tasks], {dispatched, failed, _assignments}) do
+  defp dispatch_tasks([task | remaining_tasks], {dispatched, failed, _mapping}) do
     case execute_task(task) do
       {:ok, worker_pid} ->
         GenServer.cast(self(), {:update_participating_worker, worker_pid})
