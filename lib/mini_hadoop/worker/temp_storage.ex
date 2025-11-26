@@ -18,6 +18,7 @@ defmodule MiniHadoop.Worker.TempStorage do
 
   def handle_call({:get_intermediate_data, job_id}, _from, state) do
     # Get all combined data for a job (for reduce phase)
+    # expected output : {:ok, ["key1", "key2", "key3"]}
 
     {:reply,:ok ,state}
   end

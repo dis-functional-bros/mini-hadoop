@@ -201,6 +201,9 @@ defmodule MiniHadoop.Job.JobRunner do
     end
   end
 
+
+
+
   defp execute_shuffle_phase(state) do
     Logger.info("Executing shuffle phase")
 
@@ -210,21 +213,36 @@ defmodule MiniHadoop.Job.JobRunner do
       {:failed_reduce_tasks, 0}
     ])
 
+    workers = ComputeOperation.get_workers()
+    job_id = state.job.job_id
 
-    # fetch result map, it will look like this:
-    #
-    # TODO
-    # %{
-    #   worker_pid_1 =>#MapSet<["key1", "key3", "key2"]>,
-    #   worker_pid_2 =>#MapSet<["key1", "key3", "key2"]>,
-    #   worker_pid_3 =>#MapSet<["key1", "key3", "key2"]>
-    # }
-    #
-    # Output: [{"key", [(), pid()]}, {"key", [pid(), pid()]}, {"key", [pid(), pid()]}]
+    # 1. Fetch keys from all workers using get_intermediate_data
+    # Output: %{worker_pid => MapSet<keys>}
+    worker_keys_map =
+      Map.new(workers, fn worker_pid ->
+        keys =
+          try do
+             case GenServer.call(worker_pid, {:get_intermediate_data, job_id}, 10_000) do
+               {:ok, keys} -> MapSet.new(keys)
+               _ -> MapSet.new()
+             end
+          catch
+            :exit, _ -> MapSet.new()
+          end
 
-    # Generate dummy shuffle data
-    workers_pids = ComputeOperation.get_workers()
-    shuffle_result = [{"dummy", Enum.take(workers_pids, 2)}, {"data", [Enum.at(workers_pids, 0)]}]
+        {worker_pid, keys}
+      end)
+
+    # 2. Transform to Output: [{"key", [pid(), pid()]}]
+    shuffle_result =
+      worker_keys_map
+      |> Enum.flat_map(fn {worker_pid, keys} ->
+        Enum.map(keys, fn key -> {key, worker_pid} end)
+      end)
+      |> Enum.group_by(fn {key, _pid} -> key end, fn {_key, pid} -> pid end)
+      |> Enum.map(fn {key, pids} -> {key, Enum.uniq(pids)} end)
+
+    Logger.info("Shuffle completed. Keys found: #{length(shuffle_result)}")
 
     %{state | shuffle_data: shuffle_result, status: :shuffle_completed}
     |> execute_reduce_phase()
