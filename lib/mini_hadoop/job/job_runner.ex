@@ -210,7 +210,19 @@ defmodule MiniHadoop.Job.JobRunner do
       {:failed_reduce_tasks, 0}
     ])
 
-    # Shuffle logic
+
+    # fetch result map, it will look like this:
+    #
+    # TODO
+    # %{
+    #   worker_pid_1 =>#MapSet<["key1", "key3", "key2"]>,
+    #   worker_pid_2 =>#MapSet<["key1", "key3", "key2"]>,
+    #   worker_pid_3 =>#MapSet<["key1", "key3", "key2"]>
+    # }
+    #
+    # Output: [{"key", [(), pid()]}, {"key", [pid(), pid()]}, {"key", [pid(), pid()]}]
+
+    # Generate dummy shuffle data
     workers_pids = ComputeOperation.get_workers()
     shuffle_result = [{"dummy", Enum.take(workers_pids, 2)}, {"data", [Enum.at(workers_pids, 0)]}]
 
@@ -294,6 +306,7 @@ defmodule MiniHadoop.Job.JobRunner do
   # Task generation and dispatch (simplified - no assignment tracking)
   defp generate_map_tasks_for_job(job) do
     worker_pids = ComputeOperation.get_workers()
+    # TODO real task generation
 
     1..10
     |> Enum.map(fn task_id ->
@@ -305,6 +318,8 @@ defmodule MiniHadoop.Job.JobRunner do
   end
 
   defp generate_reduce_tasks_for_job(job, shuffle_data) do
+    # TODO real task generation
+
     shuffle_data
     |> Enum.map(fn {key, worker_pids} ->
       ComputeTask.new_reduce(

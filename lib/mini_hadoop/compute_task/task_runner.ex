@@ -135,7 +135,6 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
         map_input = "Dummy data dummy data dummy data dummy data dummy data dummy data"
         execute_map_task(map_input, task.function, [])
 
-
       :reduce ->
         # TODO
         # Prepare reduce_data from intermediate_data in task.input_data
@@ -153,7 +152,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
     #TODO
     # Implement the map task make it so that is extensible
 
-    # dummy result
+    # dummy result map funciton word_count
     %{"dummy": [2, 4], "data": [1, 3]}
   end
 

@@ -19,7 +19,7 @@ defmodule MiniHadoop do
     job = %{
       input: ["test_input"],
       output: "test_output",
-      map_function: fn x -> {x, x * 2} end,
+      map_function: fn x -> [{x, x * 2}] end,
       reduce_function: fn {x, y} -> {x, Enum.sum(y)} end,
       num_reducers: 2,
     }
