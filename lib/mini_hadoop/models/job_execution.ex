@@ -67,8 +67,7 @@ defmodule MiniHadoop.Models.JobExecution do
       status: :completed,
       completed_at: DateTime.utc_now(),
       elapsed_time_ms: DateTime.diff(DateTime.utc_now(), job_execution.started_at, :millisecond),
-      results: results,
-      progress: %{map: {1, 1}, reduce: {1, 1}} # Mark both phases as complete
+      results: results
     }
   end
 

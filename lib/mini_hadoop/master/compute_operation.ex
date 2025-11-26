@@ -105,8 +105,6 @@ defmodule MiniHadoop.Master.ComputeOperation do
     case JobSpec.new(job_attrs) do
       {:ok, job_spec} ->
 
-        #
-
         # Create job execution in pending state
         job_execution = JobExecution.new(job_spec.job_id, job_spec.num_reducers)
 
@@ -190,7 +188,6 @@ defmodule MiniHadoop.Master.ComputeOperation do
   end
 
   def handle_cast({:job_completed, job_id, results}, state) do
-    Logger.info("Job #{job_id} completed with results")
 
     state = update_in(state.job_executions[job_id], fn job_execution ->
       JobExecution.mark_completed(job_execution, results)
@@ -255,9 +252,7 @@ defmodule MiniHadoop.Master.ComputeOperation do
 
         # Start next pending job
         state = start_pending_jobs(state)
-
         {:noreply, state}
-
       nil ->
         {:noreply, state}  # Not one of our job processes
     end

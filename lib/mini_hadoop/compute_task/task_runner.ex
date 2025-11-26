@@ -2,22 +2,33 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
   use GenServer
   require Logger
 
+  @ets_table :task_runner_counters
+  @task_refs_table :task_runner_refs
+
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts)
   end
 
   def init(opts) do
+    # Create ETS table for atomic counters
+    :ets.new(@ets_table, [:set, :private, :named_table])
+    :ets.insert(@ets_table, {:current_tasks, 0})
+
+    # Create ETS table for task reference tracking
+    :ets.new(@task_refs_table, [:set, :private, :named_table])
+
     {:ok, %{
       max_concurrent_tasks: opts[:max_concurrent_compute_tasks] || 1,
-      current_tasks: 0,  # Counter running tasks
       pending_tasks: :queue.new(),
       worker_node_pid: opts[:worker_node_pid]
     }}
   end
 
   def handle_call(:get_status, _from, state) do
+    [{:current_tasks, current}] = :ets.lookup(@ets_table, :current_tasks)
+
     status = %{
-      running: state.current_tasks,
+      running: current,
       pending: :queue.len(state.pending_tasks),
       max_concurrent: state.max_concurrent_tasks
     }
@@ -30,8 +41,11 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
     |> then(fn new_state -> {:noreply, new_state} end)
   end
 
-  # Task completion with task info included in result
-  def handle_info({ref, {task, result}}, state) when is_reference(ref) do
+  # Update the completion handler
+  def handle_info({task_ref, {ref, task, result}}, state) when is_reference(task_ref) do
+    # Clean up our custom ref
+    :ets.delete(@task_refs_table, ref)
+
     state
     |> decrement_task_count()
     |> save_result(task, result)
@@ -40,11 +54,30 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
     |> then(fn new_state -> {:noreply, new_state} end)
   end
 
+  # Successful completion - ignore
+  def handle_info({:DOWN, ref, :process, _pid, :normal}, state) do
+    {:noreply, state}
+  end
   # Task failure handler
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) when is_reference(ref) do
-    state
-    |> decrement_task_count()
-    |> process_next_pending_task()
+    # Look up task info from ETS and notify failure
+    case :ets.lookup(@task_refs_table, ref) do
+      [{^ref, job_ref, task_id}] ->
+        # Clean up the reference tracking
+        :ets.delete(@task_refs_table, ref)
+
+        state
+        |> decrement_task_count()
+        |> notify_failure(job_ref, task_id, reason)
+        |> process_next_pending_task()
+
+      [] ->
+        # Unknown reference, just decrement counter
+        Logger.error("Task failure for unknown reference: #{inspect(reason)}")
+        state
+        |> decrement_task_count()
+        |> process_next_pending_task()
+    end
     |> then(fn new_state -> {:noreply, new_state} end)
   end
 
@@ -64,16 +97,22 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
   end
 
   defp execute_task_immediately(state, task) do
-    task_execution = fn ->
-      result = execute_task_logic(task)
-      {task, result}  # Return task with result for functional handling
-    end
+    # Create a unique reference first
+    ref = make_ref()
 
-    Task.Supervisor.async_nolink(MiniHadoop.ComputeTask.TaskSupervisor, task_execution)
+    # Store in ETS BEFORE any task starts
+    :ets.insert(@task_refs_table, {ref, task.job_ref, task.task_id})
+
+    # Now start the task
+    task_async = Task.Supervisor.async_nolink(MiniHadoop.ComputeTask.TaskSupervisor, fn ->
+      result = execute_task_logic(task)
+      {ref, task, result}  # Include our custom ref in the result
+    end)
 
     state
     |> increment_task_count()
   end
+
 
   defp queue_task(state, task) do
     pending_tasks = :queue.in(task, state.pending_tasks)
@@ -82,39 +121,64 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
   end
 
   defp execute_task_logic(task) do
-    Logger.debug("Starting task #{task.task_id}")
-
-    # Simulate task execution with random duration
     duration = :rand.uniform(5000) + 1000  # 1-6 seconds
     :timer.sleep(duration)
 
     # Return simulated result based on task type
     case task.type do
       :map ->
-        # Simulate map output: list of {key, value} pairs
-        Enum.map(1..:rand.uniform(10), fn i ->
-          {"key_#{:rand.uniform(5)}", i}
-        end)
+
+        # TODO
+        # prepare map_input from input_data in task.input_data
+
+        # Dummy for testing if coordination is working
+        map_input = "Dummy data dummy data dummy data dummy data dummy data dummy data"
+        execute_map_task(map_input, task.function, [])
+
 
       :reduce ->
-        # Simulate reduce output: consolidated key-value pairs
-        [{task.key, :rand.uniform(100)}]
+        # TODO
+        # Prepare reduce_data from intermediate_data in task.input_data
 
+        # Dummy for testing if coordination is working
+        reduce_input = %{"dummy"=>[4,5,7,3], "data"=>[1,2,3,4], "more_data"=>[5,6,7,8]}
+        execute_reduce_task(reduce_input, task.function, [])
       _ ->
         %{result: "completed", task_id: task.task_id}
     end
   end
 
+  @spec execute_map_task(any(), (any() -> [{any(), any()}]), any()) :: %{any() => [any()]}
+  defp execute_map_task(input, map_function, additional_context) do
+    #TODO
+    # Implement the map task make it so that is extensible
+
+    # dummy result
+    %{"dummy": [2, 4], "data": [1, 3]}
+  end
+
+  @spec execute_reduce_task(any(), (any() -> [{any(), any()}]), any()) :: %{any() => any()}
+  defp execute_reduce_task(input, reduce_function, additional_context) do
+    #TODO
+    # Implement the reduce task make it so that is extensible
+
+    # dummy result
+    %{"dummy": 6, "data": 4}
+  end
+
   defp can_accept_more_tasks?(state) do
-    state.current_tasks < state.max_concurrent_tasks
+    [{:current_tasks, current}] = :ets.lookup(@ets_table, :current_tasks)
+    current < state.max_concurrent_tasks
   end
 
   defp increment_task_count(state) do
-    %{state | current_tasks: state.current_tasks + 1}
+    :ets.update_counter(@ets_table, :current_tasks, 1)
+    state
   end
 
   defp decrement_task_count(state) do
-    %{state | current_tasks: state.current_tasks - 1}
+    :ets.update_counter(@ets_table, :current_tasks, -1)
+    state
   end
 
   defp notify_completion(state, task) do
@@ -123,7 +187,14 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
 
     # TODO
     # Save result to worker temp_storage
-    Logger.info("Task #{task.task_id} completed")
+    state
+  end
+
+  defp notify_failure(state, job_ref, task_id, reason) do
+    # Side effect at the boundary
+    send(job_ref, {:task_failed, task_id, reason})
+
+    Logger.error("Task #{task_id} failed with reason: #{inspect(reason)}")
     state
   end
 

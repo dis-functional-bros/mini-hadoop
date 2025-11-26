@@ -9,67 +9,272 @@ defmodule MiniHadoop.Job.JobRunner do
     :job,
     :map_tasks,
     :reduce_tasks,
-    :map_results,
+    :shuffle_data,
     :status,
-    :started_at
+    :started_at,
+    :participating_workers,
+    :total_map_tasks,
+    :total_reduce_tasks
   ]
 
-  # Start via DynamicSupervisor
+  @ets_table :job_runner_counters
+
   def start_link(job) do
     GenServer.start_link(__MODULE__, job)
   end
 
   @impl true
   def init(job) do
+    :ets.new(@ets_table, [:set, :private, :named_table])
+    initialize_counters()
+
     state = %__MODULE__{
       job: job,
       status: :starting,
       started_at: DateTime.utc_now()
     }
 
-    # Notify ComputeOperation
     GenServer.cast(ComputeOperation, {:job_started, job.job_id})
-
-    # Start processing asynchronously
     Process.send(self(), :start_processing, [])
-
     {:ok, state}
   end
 
-  def handle_info(:start_processing, state) do
-    Logger.info("Job #{state.job.job_id}: Starting processing")
+  # Task Handler - detect task type from task_id prefix
+  def handle_info({:task_completed, task_id}, state) do
 
-    state
-    |> execute_job_pipeline()
-    |> handle_job_result()
+    if String.starts_with?(task_id, "red_") do
+      handle_reduce_task_completed(state)
+    else
+      handle_map_task_completed(state)
+    end
+
+    {:noreply, state}
   end
 
-  # Functional job execution pipeline
-  defp execute_job_pipeline(state) do
-    state
+  def handle_info({:task_failed, task_id, error}, state) do
+    Logger.error("Task failed: #{task_id}, error: #{error}")
+
+    if String.starts_with?(task_id, "red_") do
+      handle_reduce_task_failed(state)
+    else
+      handle_map_task_failed(state)
+    end
+
+    {:noreply, state}
+  end
+
+  def handle_info({:DOWN, _ref, :process, dead_worker_pid, reason}, state) do
+    Logger.error("Worker died: #{inspect(dead_worker_pid)}, reason: #{reason}")
+    {:noreply, state}
+  end
+
+  # Phase transition handler
+  def handle_info(:proceed_to_shuffle, state) do
+    Logger.info("Proceeding to shuffle phase")
+    {:noreply, execute_shuffle_phase(state)}
+  end
+
+  def handle_info(:proceed_to_completion, state) do
+    Logger.info("Job #{state.job.job_id}: Proceeding to completion")
+    final_state = notify_job_completion(state)
+    :ets.delete(@ets_table)
+    {:stop, :normal, final_state}
+  end
+
+  def handle_info({:job_failed, error}, state) do
+    Logger.error("Job #{state.job.job_id} failed: #{inspect(error)}")
+    final_state = notify_job_failure(state, error)
+    :ets.delete(@ets_table)
+    {:stop, :normal, final_state}
+  end
+
+  def handle_info(:start_processing, state) do
+    Logger.info("Starting job processing")
+    new_state = state
     |> notify_job_start()
     |> execute_map_phase()
-    # |> execute_shuffle_phase()
+    {:noreply, new_state}
+  end
+
+  def handle_cast({:update_participating_worker, worker_pid}, state) do
+    updated_workers = MapSet.put(state.participating_workers || MapSet.new(), worker_pid)
+    {:noreply, %{state | participating_workers: updated_workers}}
+  end
+
+  # Simple counter handlers
+  defp handle_map_task_completed(state) do
+    completed = :ets.update_counter(@ets_table, :completed_map_tasks, 1)
+    update_progress(:map, completed, get_failed_map_tasks(), state.total_map_tasks, state.job.job_id)
+    check_map_completion(state, completed, get_failed_map_tasks())
+  end
+
+  defp handle_reduce_task_completed(state) do
+    completed = :ets.update_counter(@ets_table, :completed_reduce_tasks, 1)
+    update_progress(:reduce, completed, get_failed_reduce_tasks(), state.total_reduce_tasks, state.job.job_id)
+    check_reduce_completion(state, completed, get_failed_reduce_tasks())
+  end
+
+  defp handle_map_task_failed(state) do
+    failed = :ets.update_counter(@ets_table, :failed_map_tasks, 1)
+    update_progress(:map, get_completed_map_tasks(), failed, state.total_map_tasks, state.job.job_id)
+    check_map_completion(state, get_completed_map_tasks(), failed)
+  end
+
+  defp handle_reduce_task_failed(state) do
+    failed = :ets.update_counter(@ets_table, :failed_reduce_tasks, 1)
+    update_progress(:reduce, get_completed_reduce_tasks(), failed, state.total_reduce_tasks, state.job.job_id)
+    check_reduce_completion(state, get_completed_reduce_tasks(), failed)
+  end
+
+  # Completion checks
+  defp check_map_completion(state, completed, failed) do
+    if completed + failed >= state.total_map_tasks do
+      Logger.info("All map tasks completed (completed: #{completed}, failed: #{failed})")
+      Process.send(self(), :proceed_to_shuffle, [])
+    end
+  end
+
+  defp check_reduce_completion(state, completed, failed) do
+    if completed + failed >= state.total_reduce_tasks do
+      Logger.info("All reduce tasks completed (completed: #{completed}, failed: #{failed})")
+      Process.send(self(), :proceed_to_completion, [])
+    end
+  end
+
+  # Progress updates
+  defp update_progress(phase, completed, failed, total, job_id) do
+    GenServer.cast(ComputeOperation, {
+      :job_progress,
+      job_id,
+      phase,
+      completed + failed,
+      total
+    })
+  end
+
+  # Counter helpers
+  defp initialize_counters do
+    :ets.insert(@ets_table, [
+      {:completed_map_tasks, 0},
+      {:completed_reduce_tasks, 0},
+      {:failed_map_tasks, 0},
+      {:failed_reduce_tasks, 0}
+    ])
+  end
+
+  defp get_completed_map_tasks, do: get_counter(:completed_map_tasks)
+  defp get_completed_reduce_tasks, do: get_counter(:completed_reduce_tasks)
+  defp get_failed_map_tasks, do: get_counter(:failed_map_tasks)
+  defp get_failed_reduce_tasks, do: get_counter(:failed_reduce_tasks)
+
+  defp get_counter(key) do
+    [{^key, value}] = :ets.lookup(@ets_table, key)
+    value
+  end
+
+  # Job execution pipeline (simplified)
+  defp execute_map_phase(state) do
+    try do
+      state
+      |> notify_phase_start(:map)
+      |> generate_map_tasks()
+      |> dispatch_map_tasks()
+      |> wait_for_map_completion()
+    rescue
+      error ->
+        Process.send(self(), {:job_failed, error}, [])
+        state
+    end
+  end
+
+  defp execute_reduce_phase(state) do
+    try do
+      state
+      |> notify_phase_start(:reduce)
+      |> generate_reduce_tasks()
+      |> dispatch_reduce_tasks()
+      |> wait_for_reduce_completion()
+    rescue
+      error ->
+        Process.send(self(), {:job_failed, error}, [])
+        state
+    end
+  end
+
+  defp execute_shuffle_phase(state) do
+    Logger.info("Executing shuffle phase")
+
+    # Reset reduce phase counters
+    :ets.insert(@ets_table, [
+      {:completed_reduce_tasks, 0},
+      {:failed_reduce_tasks, 0}
+    ])
+
+    # Shuffle logic
+    workers_pids = ComputeOperation.get_workers()
+    shuffle_result = [{"dummy", Enum.take(workers_pids, 2)}, {"data", [Enum.at(workers_pids, 0)]}]
+
+    %{state | shuffle_data: shuffle_result, status: :shuffle_completed}
     |> execute_reduce_phase()
-    |> notify_job_completion()
-  rescue
-    error ->
-      %{state | status: :failed}
-      |> notify_job_failure(error)
-      |> then(fn failed_state -> {:error, failed_state, error} end)
   end
 
-  defp handle_job_result({:error, state, error}) do
-    Logger.error("Job #{state.job.job_id} failed: #{inspect(error)}")
-    {:stop, :normal, state}
+  # Phase operations
+  defp notify_phase_start(state, phase) do
+    GenServer.cast(ComputeOperation, {:job_status, state.job.job_id, phase})
+    state
   end
 
-  defp handle_job_result(state) do
-    Logger.info("Job #{state.job.job_id}: Completed, shutting down")
-    {:stop, :normal, state}
+  defp generate_map_tasks(state) do
+    map_tasks = generate_map_tasks_for_job(state.job)
+    Logger.info("Generated #{length(map_tasks)} map tasks")
+    %{state | map_tasks: map_tasks}
   end
 
-  # Pure state transformations with side effects at boundaries
+  defp generate_reduce_tasks(state) do
+    reduce_tasks = generate_reduce_tasks_for_job(state.job, state.shuffle_data)
+    Logger.info("Generated #{length(reduce_tasks)} reduce tasks")
+    %{state | reduce_tasks: reduce_tasks}
+  end
+
+  defp dispatch_map_tasks(state) do
+    {dispatched, failed, _assignments} = dispatch_tasks(state.map_tasks, {0, 0, %{}})
+    Logger.info("Dispatched #{dispatched} map tasks, #{failed} failed")
+
+    %{state |
+      map_tasks: nil,
+      total_map_tasks: dispatched
+    }
+  end
+
+  defp dispatch_reduce_tasks(state) do
+    {dispatched, failed, _assignments} = dispatch_tasks(state.reduce_tasks, {0, 0, %{}})
+    Logger.info("Dispatched #{dispatched} reduce tasks, #{failed} failed")
+
+    %{state |
+      reduce_tasks: nil,
+      total_reduce_tasks: dispatched
+    }
+  end
+
+  defp wait_for_map_completion(state) do
+    if state.total_map_tasks > 0 do
+      %{state | status: :map_waiting}
+    else
+      Process.send(self(), :proceed_to_shuffle, [])
+      state
+    end
+  end
+
+  defp wait_for_reduce_completion(state) do
+    if state.total_reduce_tasks > 0 do
+      %{state | status: :reduce_waiting}
+    else
+      Process.send(self(), :proceed_to_completion, [])
+      state
+    end
+  end
+
+  # Notification functions
   defp notify_job_start(state) do
     GenServer.cast(ComputeOperation, {:job_status, state.job.job_id, :starting})
     state
@@ -83,178 +288,10 @@ defmodule MiniHadoop.Job.JobRunner do
 
   defp notify_job_failure(state, error) do
     GenServer.cast(ComputeOperation, {:job_failed, state.job.job_id, error})
-    state
+    %{state | status: :failed}
   end
 
-  # Map phase as pure data transformation
-  defp execute_map_phase(state) do
-    state
-    |> notify_map_phase_start()
-    |> generate_map_tasks()
-    |> dispatch_map_tasks()
-    |> wait_for_map_completion()
-    |> then(fn new_state -> %{new_state | status: :map_completed} end)
-  end
-
-  defp notify_map_phase_start(state) do
-    GenServer.cast(ComputeOperation, {:job_status, state.job.job_id, :map_phase})
-    state
-  end
-
-  defp generate_map_tasks(state) do
-    map_tasks = generate_map_tasks_for_job(state.job)
-    Logger.info("Generated #{length(map_tasks)} map tasks")
-    %{state | map_tasks: map_tasks}
-  end
-
-  defp dispatch_map_tasks(state) do
-    {dispatched, failed, task_assignments} =
-      state.map_tasks
-      |> dispatch_tasks({0, 0, %{}})
-
-    # Monitor workers for fault tolerance
-    task_assignments
-    |> Map.values()
-    |> Enum.each(&Process.monitor/1)
-
-    Logger.info("Dispatched #{dispatched} map tasks, #{failed} failed")
-
-    %{state | map_tasks: nil}  # Clear tasks after dispatch
-    |> Map.put(:task_assignments, task_assignments)
-    |> Map.put(:total_map_tasks, dispatched)
-  end
-
-  defp wait_for_map_completion(state) do
-    if state.total_map_tasks > 0 do
-      wait_for_tasks_completion(
-        state.total_map_tasks,
-        0,
-        state.task_assignments,
-        state.job.job_id
-      )
-    end
-
-    %{state | task_assignments: nil}  # Clean up assignments
-  end
-
-  # Reduce phase as pure data transformation
-  defp execute_reduce_phase(state) do
-    state
-    |> notify_reduce_phase_start()
-    |> execute_reduce_tasks()
-    |> then(fn new_state -> %{new_state | status: :reduce_completed} end)
-  end
-
-  defp notify_reduce_phase_start(state) do
-    GenServer.cast(ComputeOperation, {:job_status, state.job.job_id, :reduce_phase})
-    state
-  end
-
-  defp execute_reduce_tasks(state) do
-    total_reduce_tasks = 3
-    Logger.info("Starting #{total_reduce_tasks} reduce tasks")
-
-    1..total_reduce_tasks
-    |> Enum.reduce(state, fn task_num, acc ->
-      Process.sleep(3000)  # Simulate work
-      Logger.info("Reduce task #{task_num}/#{total_reduce_tasks} completed")
-
-      # Update progress
-      GenServer.cast(ComputeOperation, {:job_progress, acc.job.job_id, :reduce, task_num, total_reduce_tasks})
-      acc
-    end)
-  end
-
-  # Functional task dispatch
-  defp dispatch_tasks([], acc), do: acc
-
-  defp dispatch_tasks([task | remaining_tasks], {dispatched, failed, assignments}) do
-    case execute_task(task) do
-      {:ok, worker_pid} ->
-        Logger.debug("Task #{task.task_id} dispatched to worker #{inspect(worker_pid)}")
-        new_assignments = Map.put(assignments, task.task_id, worker_pid)
-        dispatch_tasks(remaining_tasks, {dispatched + 1, failed, new_assignments})
-
-      {:ok, :all_workers_queue_full} ->
-        Logger.debug("All workers queue are full, retrying")
-        dispatch_tasks([task | remaining_tasks], {dispatched, failed, assignments})
-
-      {:error, reason} ->
-        Logger.error("Failed to dispatch task #{task.task_id}: #{reason}")
-        dispatch_tasks(remaining_tasks, {dispatched, failed + 1, assignments})
-
-      {:error, :no_worker} ->
-        remaining_count = length(remaining_tasks)
-        dispatch_tasks([], {dispatched, failed + 1 + remaining_count, assignments})
-    end
-  end
-
-  # Functional task waiting with pattern matching
-  defp wait_for_tasks_completion(total_tasks, total_tasks, _assignments, _job_id), do: :ok
-
-  defp wait_for_tasks_completion(total_tasks, received, assignments, job_id) do
-    receive do
-      message ->
-        handle_task_message(message, total_tasks, received, assignments, job_id)
-    end
-  end
-
-  defp handle_task_message({:task_completed, task_id}, total_tasks, received, assignments, job_id) do
-    new_received = received + 1
-    Logger.debug("Task #{task_id} completed (#{new_received}/#{total_tasks})")
-
-    GenServer.cast(ComputeOperation, {:job_progress, job_id, :map, new_received, total_tasks})
-
-    assignments
-    |> Map.delete(task_id)
-    |> then(fn new_assignments ->
-      wait_for_tasks_completion(total_tasks, new_received, new_assignments, job_id)
-    end)
-  end
-
-  defp handle_task_message({:task_failed, task_id, error}, total_tasks, received, assignments, job_id) do
-    new_received = received + 1
-    Logger.error("Task #{task_id} failed: #{error} (#{new_received}/#{total_tasks})")
-
-    GenServer.cast(ComputeOperation, {:job_progress, job_id, :map, new_received, total_tasks})
-
-    assignments
-    |> Map.delete(task_id)
-    |> then(fn new_assignments ->
-      wait_for_tasks_completion(total_tasks, new_received, new_assignments, job_id)
-    end)
-  end
-
-  defp handle_task_message({:DOWN, _ref, :process, dead_worker_pid, reason}, total_tasks, received, assignments, job_id) do
-    Logger.error("Worker #{inspect(dead_worker_pid)} died: #{reason}")
-
-    {failed_tasks, remaining_assignments} =
-      assignments
-      |> Map.split(fn {_task_id, worker_pid} -> worker_pid == dead_worker_pid end)
-
-    tasks_failed = map_size(failed_tasks)
-    new_received = received + tasks_failed
-
-    if tasks_failed > 0 do
-      Logger.error("Marking #{tasks_failed} tasks from dead worker as failed")
-      GenServer.cast(ComputeOperation, {:job_progress, job_id, :map, new_received, total_tasks})
-
-      failed_tasks
-      |> Map.keys()
-      |> Enum.each(fn task_id ->
-        Logger.error("Task #{task_id} failed because worker died: #{reason}")
-      end)
-    end
-
-    wait_for_tasks_completion(total_tasks, new_received, remaining_assignments, job_id)
-  end
-
-  defp handle_task_message(unexpected, total_tasks, received, assignments, job_id) do
-    Logger.warn("Unexpected message: #{inspect(unexpected)}")
-    wait_for_tasks_completion(total_tasks, received, assignments, job_id)
-  end
-
-  # Pure data generation functions
+  # Task generation and dispatch (simplified - no assignment tracking)
   defp generate_map_tasks_for_job(job) do
     worker_pids = ComputeOperation.get_workers()
 
@@ -267,27 +304,52 @@ defmodule MiniHadoop.Job.JobRunner do
     end)
   end
 
+  defp generate_reduce_tasks_for_job(job, shuffle_data) do
+    shuffle_data
+    |> Enum.map(fn {key, worker_pids} ->
+      ComputeTask.new_reduce(
+        job.job_id,
+        [{key, worker_pids}],
+        job.reduce_function,
+        self()
+      )
+    end)
+  end
+
+  defp dispatch_tasks([], acc), do: acc
+
+  defp dispatch_tasks([task | remaining_tasks], {dispatched, failed, _assignments}) do
+    case execute_task(task) do
+      {:ok, worker_pid} ->
+        GenServer.cast(self(), {:update_participating_worker, worker_pid})
+        dispatch_tasks(remaining_tasks, {dispatched + 1, failed, %{}})
+
+      {:ok, :all_workers_queue_full} ->
+        Logger.debug("All workers queue are full, retrying")
+        dispatch_tasks([task | remaining_tasks], {dispatched, failed, %{}})
+
+      {:error, reason} ->
+        Logger.error("Failed to dispatch task #{task.task_id}: #{reason}")
+        dispatch_tasks(remaining_tasks, {dispatched, failed + 1, %{}})
+
+      {:error, :no_worker} ->
+        remaining_count = length(remaining_tasks)
+        dispatch_tasks([], {dispatched, failed + 1 + remaining_count, %{}})
+    end
+  end
+
   defp generate_final_results(state) do
     %{
-      total_map_tasks: 5,
-      total_reduce_tasks: 3,
+      total_map_tasks: state.total_map_tasks,
+      total_reduce_tasks: state.total_reduce_tasks,
       output_files: [
-        "/output/#{state.job.job_id}/part-00000",
-        "/output/#{state.job.job_id}/part-00001"
+        "/placeholder/result/#{state.job.job_id}.txt",
       ],
-      summary: %{
-        total_records_processed: 5000,
-        unique_keys: 150,
-        data_size_bytes: 250000
-      }
     }
   end
 
-  # Task execution as pure function
-  @spec execute_task(ComputeTask.t()) :: {:ok, pid()} | {:error, String.t()}
   defp execute_task(task) do
-    task.input_data
-    |> choose_worker()
+    choose_worker(task)
     |> then(fn
       {:ok, worker_pid} ->
         GenServer.cast(worker_pid, {:execute_task, task})
@@ -298,12 +360,22 @@ defmodule MiniHadoop.Job.JobRunner do
     end)
   end
 
-  @spec choose_worker(tuple()) :: {:ok, pid()} | {:error, String.t()}
-  defp choose_worker({_block_id, [worker_pid | _]}) do
+  defp choose_worker(%{type: :map, input_data: {_block_id, [worker_pid | _]}}) do
     {:ok, worker_pid}
   end
 
-  defp choose_worker(_) do
-    {:error, "Invalid block info structure"}
+  defp choose_worker(%{type: :reduce}) do
+    available_workers = ComputeOperation.get_workers()
+
+    case available_workers do
+      [] -> {:error, :no_worker}
+      workers ->
+        worker = Enum.random(workers)
+        {:ok, worker}
+    end
+  end
+
+  defp choose_worker(_task) do
+    {:error, "Invalid task structure"}
   end
 end
