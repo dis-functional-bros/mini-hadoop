@@ -41,7 +41,6 @@ defmodule MiniHadoop.Job.JobRunner do
 
   # Task Handler
   def handle_info({:task_completed, task_id}, state) do
-
     if String.starts_with?(task_id, "red_") do
       handle_reduce_task_completed(state)
     else
@@ -98,9 +97,12 @@ defmodule MiniHadoop.Job.JobRunner do
 
   def handle_info(:start_processing, state) do
     Logger.info("Starting job processing")
-    new_state = state
-    |> notify_job_start()
-    |> execute_map_phase()
+
+    new_state =
+      state
+      |> notify_job_start()
+      |> execute_map_phase()
+
     {:noreply, new_state}
   end
 
@@ -112,25 +114,57 @@ defmodule MiniHadoop.Job.JobRunner do
   # Simple counter handlers
   defp handle_map_task_completed(state) do
     completed = :ets.update_counter(@ets_table, :completed_map_tasks, 1)
-    update_progress(:map, completed, get_failed_map_tasks(), state.total_map_tasks, state.job.job_id)
+
+    update_progress(
+      :map,
+      completed,
+      get_failed_map_tasks(),
+      state.total_map_tasks,
+      state.job.job_id
+    )
+
     check_map_completion(state, completed, get_failed_map_tasks())
   end
 
   defp handle_reduce_task_completed(state) do
     completed = :ets.update_counter(@ets_table, :completed_reduce_tasks, 1)
-    update_progress(:reduce, completed, get_failed_reduce_tasks(), state.total_reduce_tasks, state.job.job_id)
+
+    update_progress(
+      :reduce,
+      completed,
+      get_failed_reduce_tasks(),
+      state.total_reduce_tasks,
+      state.job.job_id
+    )
+
     check_reduce_completion(state, completed, get_failed_reduce_tasks())
   end
 
   defp handle_map_task_failed(state) do
     failed = :ets.update_counter(@ets_table, :failed_map_tasks, 1)
-    update_progress(:map, get_completed_map_tasks(), failed, state.total_map_tasks, state.job.job_id)
+
+    update_progress(
+      :map,
+      get_completed_map_tasks(),
+      failed,
+      state.total_map_tasks,
+      state.job.job_id
+    )
+
     check_map_completion(state, get_completed_map_tasks(), failed)
   end
 
   defp handle_reduce_task_failed(state) do
     failed = :ets.update_counter(@ets_table, :failed_reduce_tasks, 1)
-    update_progress(:reduce, get_completed_reduce_tasks(), failed, state.total_reduce_tasks, state.job.job_id)
+
+    update_progress(
+      :reduce,
+      get_completed_reduce_tasks(),
+      failed,
+      state.total_reduce_tasks,
+      state.job.job_id
+    )
+
     check_reduce_completion(state, get_completed_reduce_tasks(), failed)
   end
 
@@ -210,29 +244,38 @@ defmodule MiniHadoop.Job.JobRunner do
   end
 
   defp execute_shuffle_phase(state) do
-    Logger.info("Executing shuffle phase")
-
-    # Reset reduce phase counters
     :ets.insert(@ets_table, [
       {:completed_reduce_tasks, 0},
       {:failed_reduce_tasks, 0}
     ])
 
+    job_id = state.job.job_id
 
-    # fetch result map, it will look like this:
-    #
-    # TODO
-    # %{
-    #   worker_pid_1 =>#MapSet<["key1", "key3", "key2"]>,
-    #   worker_pid_2 =>#MapSet<["key1", "key3", "key2"]>,
-    #   worker_pid_3 =>#MapSet<["key1", "key3", "key2"]>
-    # }
-    #
-    # Output: [{"key1", [worker_pid_1, worker_pid_2, worker_pid_3]}, {"key", [worker_pid_1, worker_pid_2, worker_pid_3]}, {"key", [worker_pid_1, worker_pid_2, worker_pid_3]}]
-
-    # Generate dummy shuffle data
-    workers_pids = ComputeOperation.get_workers()
-    shuffle_result = [{"dummy", Enum.take(workers_pids, 2)}, {"data", [Enum.at(workers_pids, 0)]}]
+    shuffle_result =
+      ComputeOperation.get_workers()
+      # lazy
+      # Hasilnya sebelum flat_map:
+      # [
+      #  {:ok, [{"k1", #PID<0.1>}, {"k2", #PID<0.1>}]},
+      #  {:ok, [{"k2", #PID<0.2>}, {"k3", #PID<0.2>}]}
+      # ]
+      |> Task.async_stream(
+        fn worker_pid ->
+          try do
+            case GenServer.call(worker_pid, {:get_intermediate_data, job_id}, :infinity) do
+              {:ok, keys} -> Enum.map(keys, fn key -> {key, worker_pid} end)
+              _ -> []
+            end
+          catch
+            :exit, _ -> []
+          end
+        end,
+        max_concurrency: 100,
+        timeout: :infinity
+      )
+      |> Enum.flat_map(fn {:ok, result} -> result end)
+      |> Enum.group_by(fn {key, _} -> key end, fn {_, pid} -> pid end)
+      |> Enum.map(fn {key, pids} -> {key, Enum.uniq(pids)} end)
 
     %{state | shuffle_data: shuffle_result, status: :shuffle_completed}
     |> execute_reduce_phase()
@@ -260,20 +303,14 @@ defmodule MiniHadoop.Job.JobRunner do
     {dispatched, failed, _assignments} = dispatch_tasks(state.map_tasks, {0, 0, %{}})
     Logger.info("Dispatched #{dispatched} map tasks, #{failed} failed")
 
-    %{state |
-      map_tasks: nil,
-      total_map_tasks: dispatched
-    }
+    %{state | map_tasks: nil, total_map_tasks: dispatched}
   end
 
   defp dispatch_reduce_tasks(state) do
     {dispatched, failed, _assignments} = dispatch_tasks(state.reduce_tasks, {0, 0, %{}})
     Logger.info("Dispatched #{dispatched} reduce tasks, #{failed} failed")
 
-    %{state |
-      reduce_tasks: nil,
-      total_reduce_tasks: dispatched
-    }
+    %{state | reduce_tasks: nil, total_reduce_tasks: dispatched}
   end
 
   defp wait_for_map_completion(state) do
@@ -367,8 +404,8 @@ defmodule MiniHadoop.Job.JobRunner do
       total_map_tasks: state.total_map_tasks,
       total_reduce_tasks: state.total_reduce_tasks,
       output_files: [
-        "/placeholder/result/#{state.job.job_id}.txt",
-      ],
+        "/placeholder/result/#{state.job.job_id}.txt"
+      ]
     }
   end
 
@@ -392,7 +429,9 @@ defmodule MiniHadoop.Job.JobRunner do
     available_workers = ComputeOperation.get_workers()
 
     case available_workers do
-      [] -> {:error, :no_worker}
+      [] ->
+        {:error, :no_worker}
+
       workers ->
         worker = Enum.random(workers)
         {:ok, worker}

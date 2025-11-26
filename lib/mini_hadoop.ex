@@ -21,11 +21,11 @@ defmodule MiniHadoop do
       output: "test_output",
       map_function: fn x -> [{x, x * 2}] end,
       reduce_function: fn {x, y} -> {x, Enum.sum(y)} end,
-      num_reducers: 2,
+      num_reducers: 2
     }
+
     ComputeOperation.submit_job(job)
   end
-
 
   @doc """
   Executes a Map function against a stored block.
@@ -70,8 +70,8 @@ defmodule MiniHadoop do
     %{
       master_state: master_state,
       uptime: uptime,
-      started_at: app_start_time
+      started_at: app_start_time,
+      datanodes: datanodes
     }
-
   end
 end
