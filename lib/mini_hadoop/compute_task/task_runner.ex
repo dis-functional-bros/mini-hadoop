@@ -136,7 +136,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
         execute_map_task(map_input, task.function, [])
 
       :reduce ->
-        # TODO
+        # /
         # Prepare reduce_data from intermediate_data in task.input_data
 
         # Dummy for testing if coordination is working
@@ -147,13 +147,23 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
     end
   end
 
-  @spec execute_map_task(any(), (any() -> [{any(), any()}]), any()) :: %{any() => [any()]}
-  defp execute_map_task(input, map_function, additional_context) do
-    #TODO
-    # Implement the map task make it so that is extensible
+  @spec execute_map_task(any(), (any() -> Enum.t()), any()) :: %{any() => [any()]}
+  def execute_map_task(input, map_function, additional_context) do
+    # Execute the map function using the MiniHadoop.Map behaviour
+    case MiniHadoop.Map.execute(map_function, input, additional_context) do
+      {:ok, result} ->
+        # Result is expected to be a list of {key, value} tuples
+        # We need to group them by key for the shuffle phase
+        group_by_key(result)
 
-    # dummy result map funciton word_count
-    %{"dummy": [2, 4], "data": [1, 3]}
+      {:error, reason} ->
+        # Re-raise to be caught by the task supervisor
+        raise "Map task failed: #{inspect(reason)}"
+    end
+  end
+
+  defp group_by_key(key_value_pairs) do
+    Enum.group_by(key_value_pairs, fn {k, _v} -> k end, fn {_k, v} -> v end)
   end
 
   @spec execute_reduce_task(any(), (any() -> [{any(), any()}]), any()) :: %{any() => any()}
