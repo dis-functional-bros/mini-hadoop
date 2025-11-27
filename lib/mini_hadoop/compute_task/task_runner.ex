@@ -158,13 +158,14 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
     Enum.group_by(key_value_pairs, fn {k, _v} -> k end, fn {_k, v} -> v end)
   end
 
-  @spec execute_reduce_task(any(), (any() -> [{any(), any()}]), any()) :: %{any() => any()}
-  defp execute_reduce_task(input, reduce_function, additional_context) do
-    #TODO
-    # Implement the reduce task make it so that is extensible
-
-    # dummy result
-    %{"dummy": 6, "data": 4}
+  @spec execute_reduce_task(any(), module(), any()) :: %{any() => [any()]}
+  def execute_reduce_task(input, reduce_module, additional_context) do
+    case MiniHadoop.Reduce.execute(reduce_module, input, additional_context) do
+      {:ok, result} ->
+        result
+      {:error, reason} ->
+        raise "Reduce task failed: #{inspect(reason)}"
+    end
   end
 
   defp concurrent_tasks_under_limit?(state) do
