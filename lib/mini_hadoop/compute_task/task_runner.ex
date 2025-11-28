@@ -2,8 +2,6 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
   use GenServer
   require Logger
 
-  @ets_table :task_runner_counters
-  @task_refs_table :task_runner_refs
   @max_concurrent_tasks_on_runner Application.get_env(:mini_hadoop, :max_concurrent_compute_tasks, 4)
   @max_queue_size_of_task_runner Application.get_env(:mini_hadoop, :max_queue_size_of_task_runner, 20)
 
@@ -13,25 +11,24 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
 
   @impl true
   def init({job_id, job_pid, storage_pid}) do
-    # Create ETS table for atomic counters
-    :ets.new(@ets_table, [:set, :private, :named_table])
-    :ets.insert(@ets_table, {:current_tasks, 0})
+    # Create anonymous ETS tables
+    counters_table = :ets.new(nil, [:set, :private])
+    :ets.insert(counters_table, {:current_tasks, 0})
 
-    # Create ETS table for task reference tracking
-    :ets.new(@task_refs_table, [:set, :private, :named_table])
+    task_refs_table = :ets.new(nil, [:set, :private])
 
     {:ok, %{
       job_id: job_id,
       job_pid: job_pid,
       storage_pid: storage_pid,
-      pending_tasks: :queue.new()
+      pending_tasks: :queue.new(),
+      counters_table: counters_table,      # Store table references
+      task_refs_table: task_refs_table
     }}
   end
 
-
-
   def handle_call(:get_status, _from, state) do
-    [{:current_tasks, current}] = :ets.lookup(@ets_table, :current_tasks)
+    [{:current_tasks, current}] = :ets.lookup(state.counters_table, :current_tasks)
 
     status = %{
       running: current,
@@ -42,7 +39,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
 
   # When: Task arrive
   def handle_cast({:execute_task, task}, state) do
-    if concurrent_tasks_under_limit?() do
+    if concurrent_tasks_under_limit?(state) do
       {:noreply, execute_task_immediately(state, task)}
     else
       {:noreply, queue_task(state, task)}
@@ -51,7 +48,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
 
    # When: Task completes successfully
    def handle_info({task_ref, {ref, task, result}}, state) when is_reference(task_ref) do
-     :ets.delete(@task_refs_table, ref)
+     :ets.delete(state.task_refs_table, ref)
      {:noreply, handle_task_completion(state, task, result)}
    end
 
@@ -62,9 +59,9 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
 
    # When: Task fails with reason
    def handle_info({:DOWN, ref, :process, _pid, reason}, state) when is_reference(ref) do
-     case :ets.lookup(@task_refs_table, ref) do
+     case :ets.lookup(state.task_refs_table, ref) do
        [{^ref, task_id}] ->
-         :ets.delete(@task_refs_table, ref)
+         :ets.delete(state.task_refs_table, ref)
          {:noreply, handle_task_failure(state, task_id, reason)}
        [] ->
          Logger.error("Task failure for unknown reference: #{inspect(reason)}")
@@ -93,7 +90,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
     ref = make_ref()
 
     # Store in ETS BEFORE any task starts
-    :ets.insert(@task_refs_table, {ref, task.id})
+    :ets.insert(state.task_refs_table, {ref, task.id})
 
     # Now start the task
     task_async = Task.Supervisor.async_nolink(MiniHadoop.ComputeTask.TaskSupervisor, fn ->
@@ -103,7 +100,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
 
     # Monitor the task
     ref = Process.monitor(task_async.pid)
-    :ets.insert(@task_refs_table, {ref, task.id})
+    :ets.insert(state.task_refs_table, {ref, task.id})
 
     increment_task_count(state)
   end
@@ -115,6 +112,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
   end
 
   defp execute_task_logic(task) do
+    Process.sleep(4000)
     case fetch_task_data(task) do
       {:ok, :map, map_input} ->
         execute_map_task(map_input, task.module, %{})
@@ -126,10 +124,6 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
   end
 
   defp fetch_task_data(task) do
-    # TODO: fetch task input data
-    # format input data
-    # :map -> [{"block_id", ["worker_pid", "worker_pid"]}]  # data terletak di MiniHadoop.Worker.WorkerNode
-    # :reduce -> [{"key_1", ["storage_pid_1", "storage_pid_2", "storage_pid_3"]}]  # data terletak di MiniHadoop.ComputeTask.TaskResultStorage
     case task.type do
       :map -> {:ok, :map, "Dummy data dummy data dummy data dummy data dummy data dummy data"}
       :reduce -> {:ok, :reduce, %{"dummy"=>[4,5,7,3], "data"=>[1,2,3,4], "more_data"=>[5,6,7,8]}}
@@ -156,18 +150,18 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
     end
   end
 
-  defp concurrent_tasks_under_limit? do
-    [{:current_tasks, current}] = :ets.lookup(@ets_table, :current_tasks)
+  defp concurrent_tasks_under_limit?(state) do
+    [{:current_tasks, current}] = :ets.lookup(state.counters_table, :current_tasks)
     current < @max_concurrent_tasks_on_runner
   end
 
   defp increment_task_count(state) do
-    :ets.update_counter(@ets_table, :current_tasks, 1)
+    :ets.update_counter(state.counters_table, :current_tasks, 1)
     state
   end
 
   defp decrement_task_count(state) do
-    :ets.update_counter(@ets_table, :current_tasks, -1)
+    :ets.update_counter(state.counters_table, :current_tasks, -1)
     state
   end
 
@@ -181,6 +175,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
     Logger.error("Task #{task_id} failed with reason: #{inspect(reason)}")
     state
   end
+
   defp save_result(state, task, result) do
     try do
       case task.type do
@@ -189,7 +184,6 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
           Logger.info("Map task #{task.id} results saved to storage")
 
         :reduce ->
-          # Use batch storage for reduce results
           :ok = GenServer.call(state.storage_pid, {:store_reduce_results, result})
           Logger.info("Reduce task #{task.id} saved #{length(result)} results to storage")
       end
@@ -203,12 +197,12 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
   end
 
   defp process_next_pending_task(state) do
-    if concurrent_tasks_under_limit?() do
+    if concurrent_tasks_under_limit?(state) do
       case dequeue_task(state) do
         {task, new_state} when not is_nil(task) ->
           new_state
           |> execute_task_immediately(task)
-          |> process_next_pending_task()  # Recursively process more
+          |> process_next_pending_task()  # Recursively process task
         {nil, new_state} ->
           new_state
       end

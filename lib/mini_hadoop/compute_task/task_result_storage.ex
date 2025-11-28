@@ -78,8 +78,8 @@ defmodule MiniHadoop.ComputeTask.TaskResultStorage do
     File.mkdir_p!(storage_dir)
 
     # Create ETS table for metadata
-    ets_table_ref = :ets.new(:task_storage_metadata, [
-      :set, :protected, :named_table,
+    ets_table_ref = :ets.new(nil, [
+      :set, :protected,
       {:read_concurrency, true}
     ])
 
@@ -207,7 +207,6 @@ defmodule MiniHadoop.ComputeTask.TaskResultStorage do
   end
 
   # Private helper functions
-
   defp store_raw_pairs_to_files(key_value_pairs, storage_dir, ets_ref) do
     chunk_id = get_next_chunk_id(ets_ref)
     filename = Path.join(storage_dir, "map_chunk_#{chunk_id}.data")

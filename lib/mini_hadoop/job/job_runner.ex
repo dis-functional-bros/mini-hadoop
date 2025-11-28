@@ -12,17 +12,16 @@ defmodule MiniHadoop.Job.JobRunner do
     :job,
     :map_tasks,
     :reduce_tasks,
+    :participating_blocks,
     :shuffle_data,
     :status,
     :started_at,
     :total_map_tasks,
     :total_reduce_tasks,
-    :unique_keys_by_storage,
     :worker_process_map,
-    :load_balance_runner_tree
+    :load_balance_runner_tree,
+    :job_spawned_task_counter_ref
   ]
-
-  @ets_table :job_runner_counters
 
   def start_link(job, participating_workers) do
     GenServer.start_link(__MODULE__, {job, participating_workers})
@@ -30,8 +29,8 @@ defmodule MiniHadoop.Job.JobRunner do
 
   @impl true
   def init({job, participating_workers}) do
-    :ets.new(@ets_table, [:set, :private, :named_table])
-    initialize_counters()
+    job_spawned_task_counter_ref = :ets.new(nil, [:set, :private])
+    initialize_counters(job_spawned_task_counter_ref)
 
     case start_process_on_workers(participating_workers, job.id) do
       {:ok, worker_runner_map, load_tree} ->
@@ -45,7 +44,7 @@ defmodule MiniHadoop.Job.JobRunner do
           total_reduce_tasks: 0,
           map_tasks: [],
           reduce_tasks: [],
-          shuffle_data: []
+          job_spawned_task_counter_ref: job_spawned_task_counter_ref
         }
 
         GenServer.cast(ComputeOperation, {:job_started, job.id})
@@ -59,167 +58,93 @@ defmodule MiniHadoop.Job.JobRunner do
     end
   end
 
-  defp start_process_on_workers([], _job_id), do: {:error, :no_workers_provided}
+  # Higher-order phase execution
+  defp execute_phase(state, phase_type, data_fetcher, task_generator, task_dispatcher, completion_checker) do
+    with_counter_cleanup(state, phase_type, fn state ->
+      state
+      |> notify_phase_start(phase_type)
+      |> data_fetcher.()
+      |> (fn state_with_data ->
+            # Get data list based on phase type
+            Logger.info("Executing phase: #{phase_type}")
+            data_list = case phase_type do
+              :map -> Map.get(state_with_data, :participating_blocks)
+              :reduce -> Map.get(state_with_data, :shuffle_data)
+            end
 
-  defp start_process_on_workers(workers, job_id) do
-    job_runner_pid = self()
-    tasks = Enum.map(workers, fn worker_pid ->
-      Task.async(fn -> start_single_worker_async(worker_pid, job_id, job_runner_pid) end)
+
+            # Process in chunks to save memory
+            chunk_size = 10
+
+            data_list
+            |> Enum.chunk_every(chunk_size)
+            |> Enum.reduce(state_with_data, fn chunk, acc ->
+              # Generate and dispatch tasks for this chunk only
+              acc
+              |> Map.put(:current_chunk, chunk)
+              |> task_generator.()
+              |> task_dispatcher.()
+              |> Map.delete(:current_chunk)  # Free memory after dispatch
+            end)
+          end).()
+      |> completion_checker.()
     end)
-
-    results = Task.await_many(tasks, 10_000)
-    process_async_results(results, length(workers))
   end
 
-  defp start_single_worker_async(worker_pid, job_id, job_runner_pid) do
+  defp with_counter_cleanup(state, phase_type, fun) do
+    completed_key = :"completed_#{phase_type}_tasks"
+    :ets.insert(state.job_spawned_task_counter_ref, [{completed_key, 0}, {:failed_tasks, 0}])
+
     try do
-      case GenServer.call(worker_pid, {:start_runner_and_storage, job_id, job_runner_pid}, 5000) do
-        {:ok, result} ->
-          Logger.info("Started TaskRunner and Storage on worker #{inspect(result)}")
-          {:ok, result}
-
-        {:error, reason} ->
-          Logger.warn("Failed to start TaskRunner and Storage on worker #{inspect(worker_pid)}: #{inspect(reason)}")
-          {:error, reason}
-
-        other ->
-          Logger.error("Unexpected response from worker #{inspect(worker_pid)}: #{inspect(other)}")
-          {:error, :unexpected_response}
-      end
+      fun.(state)
     rescue
       error ->
-        Logger.error("Error calling worker #{inspect(worker_pid)}: #{inspect(error)}")
-        {:error, :communication_failed}
+        Process.send(self(), {:job_failed, error}, [])
+        state
     end
   end
 
-  defp process_async_results(results, total_workers) do
-    {worker_runner_map, load_tree, failures} =
-      Enum.reduce(results, {%{}, :gb_trees.empty(), []}, fn
-        {:ok, {worker_pid, storage_pid, task_runner_pid}}, {worker_acc, tree_acc, failure_acc} ->
-          # Build worker -> {storage, runner} mapping
-          new_worker_acc = Map.put(worker_acc, worker_pid, {storage_pid, task_runner_pid})
+  # Generic task completion handler
+  defp handle_task_completion(state, task_type, completed_key, failed_key, total_tasks_field, next_phase) do
+    completed = :ets.update_counter(state.job_spawned_task_counter_ref, completed_key, 1)
+    failed = get_counter(state.job_spawned_task_counter_ref, failed_key)
+    total = Map.get(state, total_tasks_field)
 
-          # Add to balanced tree with initial task_count = 0
-          new_tree_acc = :gb_trees.insert({0, task_runner_pid}, task_runner_pid, tree_acc)
+    update_progress(task_type, completed, failed, total, state.job.id)
+    check_completion(state, task_type, completed, failed, total, next_phase)
+  end
 
-          {new_worker_acc, new_tree_acc, failure_acc}
-
-        {:exit, reason}, {worker_acc, tree_acc, failure_acc} ->
-          {worker_acc, tree_acc, [reason | failure_acc]}
-      end)
-
-    successes_count = map_size(worker_runner_map)
-    failures_count = length(failures)
-
-    cond do
-      successes_count == 0 ->
-        Logger.error("No TaskRunners and Storage started")
-        {:error, :no_workers_started}
-
-      failures_count > 0 ->
-        Logger.warn("#{failures_count}/#{total_workers} workers failed")
-        {:ok, worker_runner_map, load_tree}
-
-      true ->
-        Logger.info("Successfully started #{successes_count} TaskRunners and Storage")
-        {:ok, worker_runner_map, load_tree}
+  defp check_completion(state, phase_type, completed, failed, total, next_phase) do
+    if completed + failed >= total do
+      Logger.info("All #{phase_type} tasks completed (completed: #{completed}, failed: #{failed})")
+      Process.send(self(), next_phase, [])
     end
+    state
   end
 
-  defp stop_all_task_runners(worker_process_map) do
-    Enum.each(worker_process_map, fn {_worker_pid, {storage_pid, task_runner_pid}} ->
-      stop_process(task_runner_pid)
-      stop_process(storage_pid)
-    end)
-  end
-
-  defp stop_process(pid) do
-    # Check if PID is valid and on a connected node
-    if pid_valid?(pid) do
-      try do
-        # Try graceful stop
-        GenServer.stop(pid, :normal, 5000)
-        true
-      rescue
-        _error ->
-          # If graceful stop fails, force kill
-          Process.exit(pid, :kill)
-          false
-      end
-    else
-      false
-    end
-  end
-
-  defp pid_valid?(pid) do
-    try do
-      # This will fail if PID is from a disconnected node or invalid
-      node = node(pid)
-      # Check if we're connected to the node or it's local
-      node == Node.self() or node in Node.list()
-    rescue
-      ArgumentError -> false
-    end
-  end
-
-  @impl true
-  def terminate(reason, state) do
-    Logger.info("Job #{state.job.id} terminated: #{inspect(reason)}")
-
-    # Stop all runners
-    stop_all_task_runners(state.worker_process_map)
-
-    # Cleanup ETS
-    cleanup_ets_table()
-  end
-
-  defp cleanup_ets_table() do
-    try do
-      :ets.delete(@ets_table)
-    rescue
-      _ -> :ok
-    end
-  end
-
-  defp cleanup_after_failed_init(job_id, reason) do
-    Logger.info("Cleaning up failed init for job #{job_id}")
-
-    cleanup_ets_table()
-
-    try do
-      GenServer.cast(ComputeOperation, {:job_failed, job_id, reason})
-    rescue
-      _ -> :ok
-    end
-  end
-
+  # Message handlers using higher-order functions
   def handle_cast({:task_completed, task_id}, state) do
     Logger.info("Task completed: #{task_id}")
-    if String.starts_with?(task_id, "red_") do
-      handle_reduce_task_completed(state)
+
+    task_handler = if String.starts_with?(task_id, "red_") do
+      &handle_reduce_task_completed/1
     else
-      handle_map_task_completed(state)
+      &handle_map_task_completed/1
     end
 
-    {:noreply, state}
+    {:noreply, task_handler.(state)}
   end
 
   def handle_cast({:task_failed, task_id, error}, state) do
     Logger.error("Task failed: #{task_id}, error: #{error}")
 
-    if String.starts_with?(task_id, "red_") do
-      handle_reduce_task_failed(state)
+    task_handler = if String.starts_with?(task_id, "red_") do
+      &handle_reduce_task_failed/1
     else
-      handle_map_task_failed(state)
+      &handle_map_task_failed/1
     end
 
-    {:noreply, state}
-  end
-
-  def handle_info({:DOWN, _ref, :process, dead_worker_pid, reason}, state) do
-    Logger.error("Worker died: #{inspect(dead_worker_pid)}, reason: #{reason}")
-    {:noreply, state}
+    {:noreply, task_handler.(state)}
   end
 
   def handle_info(:start_processing, state) do
@@ -230,27 +155,17 @@ defmodule MiniHadoop.Job.JobRunner do
     {:noreply, new_state}
   end
 
-  def handle_info(:proceed_to_shuffle, state) do
-    Logger.info("Proceeding to shuffle phase")
-    unique_keys_by_storage = fetch_all_unique_keys(state)
-    Logger.info("Unique keys structure: #{inspect(unique_keys_by_storage)}")
-
-    new_state = %{state | unique_keys_by_storage: unique_keys_by_storage}
-    {:noreply, execute_shuffle_phase(new_state)}
+  def handle_info(:proceed_to_reduce, state) do
+    Logger.info("Proceeding to reduce phase")
+    {:noreply, execute_reduce_phase(state)}
   end
 
   def handle_info(:proceed_to_completion, state) do
     Logger.info("Job #{state.job.id}: Proceeding to completion")
     reduce_results = fetch_all_reduce_results(state)
     Logger.info("Fetched #{length(reduce_results)} reduce result entries")
-    Logger.info("reduce_results: #{inspect(reduce_results)}")
 
-    # Sort the reduce results by value
-    sorted_reduce_results = Enum.sort_by(reduce_results, &elem(&1, 1))
-
-    # save to text output_files
-    save_result_to_text(sorted_reduce_results)
-
+    # sorted_reduce_results = Enum.sort_by(reduce_results, &elem(&1, 1))
     final_state = notify_job_completion(state)
     {:stop, :normal, final_state}
   end
@@ -258,259 +173,148 @@ defmodule MiniHadoop.Job.JobRunner do
   def handle_info({:job_failed, error}, state) do
     Logger.error("Job #{state.job.id} failed: #{inspect(error)}")
     final_state = notify_job_failure(state, error)
-    :ets.delete(@ets_table)
     {:stop, :normal, final_state}
   end
 
-  # Add these to catch ALL messages
+  def handle_info({:DOWN, _ref, :process, dead_worker_pid, reason}, state) do
+    Logger.error("Worker died: #{inspect(dead_worker_pid)}, reason: #{reason}")
+    {:noreply, state}
+  end
+
   def handle_info(msg, state) do
     Logger.info("JobRunner #{inspect(self())} received ANY message: #{inspect(msg)}")
     {:noreply, state}
   end
 
-  def handle_cast(msg, state) do
-    Logger.info("JobRunner #{inspect(self())} received ANY cast: #{inspect(msg)}")
-
-    case msg do
-      {:task_completed, task_id} ->
-        Logger.info("Processing task completed: #{task_id}")
-        if String.starts_with?(task_id, "red_") do
-          handle_reduce_task_completed(state)
-        else
-          handle_map_task_completed(state)
-        end
-      {:debug_test, task_id, from_node} ->
-        Logger.info("DEBUG TEST RECEIVED from #{from_node}: #{task_id}")
-      other ->
-        Logger.warning("Unknown cast: #{inspect(other)}")
-    end
-
-    {:noreply, state}
-  end
-
-  defp handle_map_task_completed(state) do
-    completed = :ets.update_counter(@ets_table, :completed_map_tasks, 1)
-
-    update_progress(
-      :map,
-      completed,
-      get_failed_map_tasks(),
-      state.total_map_tasks,
-      state.job.id
-    )
-
-    check_map_completion(state, completed, get_failed_map_tasks())
-  end
-
-  defp handle_reduce_task_completed(state) do
-    completed = :ets.update_counter(@ets_table, :completed_reduce_tasks, 1)
-
-    update_progress(
-      :reduce,
-      completed,
-      get_failed_reduce_tasks(),
-      state.total_reduce_tasks,
-      state.job.id
-    )
-
-    check_reduce_completion(state, completed, get_failed_reduce_tasks())
-  end
-
-  defp handle_map_task_failed(state) do
-    failed = :ets.update_counter(@ets_table, :failed_map_tasks, 1)
-
-    update_progress(
-      :map,
-      get_completed_map_tasks(),
-      failed,
-      state.total_map_tasks,
-      state.job.id
-    )
-
-    check_map_completion(state, get_completed_map_tasks(), failed)
-  end
-
-  defp handle_reduce_task_failed(state) do
-    failed = :ets.update_counter(@ets_table, :failed_reduce_tasks, 1)
-
-    update_progress(
-      :reduce,
-      get_completed_reduce_tasks(),
-      failed,
-      state.total_reduce_tasks,
-      state.job.id
-    )
-
-    check_reduce_completion(state, get_completed_reduce_tasks(), failed)
-  end
-
-  defp check_map_completion(state, completed, failed) do
-    if completed + failed >= state.total_map_tasks do
-      Logger.info("All map tasks completed (completed: #{completed}, failed: #{failed})")
-      Process.send(self(), :proceed_to_shuffle, [])
-    end
-  end
-
-  defp check_reduce_completion(state, completed, failed) do
-    if completed + failed >= state.total_reduce_tasks do
-      Logger.info("All reduce tasks completed (completed: #{completed}, failed: #{failed})")
-      Process.send(self(), :proceed_to_completion, [])
-    end
-  end
-
-  defp update_progress(phase, completed, failed, total, job_id) do
-    GenServer.cast(ComputeOperation, {
-      :job_progress,
-      job_id,
-      phase,
-      completed + failed,
-      total
-    })
-  end
-
-  defp initialize_counters do
-    :ets.insert(@ets_table, [
-      {:completed_map_tasks, 0},
-      {:completed_reduce_tasks, 0},
-      {:failed_map_tasks, 0},
-      {:failed_reduce_tasks, 0}
-    ])
-  end
-
-  defp get_completed_map_tasks, do: get_counter(:completed_map_tasks)
-  defp get_completed_reduce_tasks, do: get_counter(:completed_reduce_tasks)
-  defp get_failed_map_tasks, do: get_counter(:failed_map_tasks)
-  defp get_failed_reduce_tasks, do: get_counter(:failed_reduce_tasks)
-
-  defp get_counter(key) do
-    [{^key, value}] = :ets.lookup(@ets_table, key)
-    value
-  end
-
+  # Phase execution with higher-order functions
   defp execute_map_phase(state) do
-    :ets.insert(@ets_table, [
-      {:completed_map_tasks, 0},
-      {:failed_map_tasks, 0}
-    ])
-
-    try do
-      state
-      |> notify_phase_start(:map)
-      |> generate_map_tasks()
-      |> dispatch_map_tasks()
-      |> wait_for_map_completion()
-    rescue
-      error ->
-        Process.send(self(), {:job_failed, error}, [])
-        state
-    end
+    execute_phase(
+      state,
+      :map,
+      &fetch_participating_blocks/1,
+      &generate_map_tasks/1,
+      &dispatch_tasks_with_state(&1, :map_tasks, :total_map_tasks),
+      &wait_for_phase_completion(&1, :map, :proceed_to_reduce)
+    )
   end
 
   defp execute_reduce_phase(state) do
-    try do
-      state
-      |> notify_phase_start(:reduce)
-      |> generate_reduce_tasks()
-      |> dispatch_reduce_tasks()
-      |> wait_for_reduce_completion()
-    rescue
-      error ->
-        Process.send(self(), {:job_failed, error}, [])
-        state
-    end
+    execute_phase(
+      state,
+      :reduce,
+      &fetch_shuffle_data/1,
+      &generate_reduce_tasks/1,
+      &dispatch_tasks_with_state(&1, :reduce_tasks, :total_reduce_tasks),
+      &wait_for_phase_completion(&1, :reduce, :proceed_to_completion)
+    )
   end
 
-  defp execute_shuffle_phase(state) do
-    :ets.insert(@ets_table, [
-      {:completed_reduce_tasks, 0},
-      {:failed_reduce_tasks, 0}
-    ])
-
-    storage_to_unique_keys_map = state.unique_keys_by_storage
-    # =================================  TODO selesaikan logikanya udah ada datanya
-    Logger.info("Starting shuffle phase")
-    shuffle_result = [{"key", []}, {"key", []}, {"key", []}]
-    # =================================
-
-    %{state | shuffle_data: shuffle_result, status: :shuffle_completed}
-    |> execute_reduce_phase()
+  # Task completion handlers
+  defp handle_map_task_completed(state) do
+    handle_task_completion(state, :map, :completed_map_tasks, :failed_map_tasks, :total_map_tasks, :proceed_to_reduce)
   end
 
+  defp handle_reduce_task_completed(state) do
+    handle_task_completion(state, :reduce, :completed_reduce_tasks, :failed_reduce_tasks, :total_reduce_tasks, :proceed_to_completion)
+  end
+
+  defp handle_map_task_failed(state) do
+    failed = :ets.update_counter(state.job_spawned_task_counter_ref, :failed_map_tasks, 1)
+    completed = get_counter(state.job_spawned_task_counter_ref, :completed_map_tasks)
+    check_completion(state, :map, completed, failed, state.total_map_tasks, :proceed_to_reduce)
+  end
+
+  defp handle_reduce_task_failed(state) do
+    failed = :ets.update_counter(state.job_spawned_task_counter_ref, :failed_reduce_tasks, 1)
+    completed = get_counter(state.job_spawned_task_counter_ref, :completed_reduce_tasks)
+    check_completion(state, :reduce, completed, failed, state.total_reduce_tasks, :proceed_to_completion)
+  end
+
+  # Data fetching with chunk processing
+  defp fetch_participating_blocks(state) do
+    Logger.info("Fetching participating blocks")
+    worker =state.worker_process_map |> Map.keys()
+    participating_blocks = [{"block_1", [Enum.random(worker)]}, {"block_2", [Enum.random(worker)]}, {"block_3", [Enum.random(worker)]}]
+    %{state | participating_blocks: participating_blocks}
+  end
+
+  defp fetch_shuffle_data(state) do
+    Logger.info("Fetching shuffle data (unique keys from storage)")
+    unique_keys_by_storage = fetch_all_unique_keys(state)
+    Logger.info("Found #{map_size(unique_keys_by_storage)} storage nodes with keys")
+
+    # Build reverse map: key -> [storage_pids]
+    shuffle_data = unique_keys_by_storage
+    |> Enum.flat_map(fn {storage_pid, keys} ->
+      MapSet.to_list(keys)
+      |> Enum.map(fn key -> {key, storage_pid} end)
+    end)
+    |> Enum.group_by(fn {key, _} -> key end, fn {_, storage_pid} -> storage_pid end)
+    |> Enum.map(fn {key, storage_pids} -> {key, storage_pids} end)
+
+    Logger.info("Created shuffle data with #{length(shuffle_data)} unique keys")
+    %{state | shuffle_data: shuffle_data}
+  end
+
+
+  # Task generation
   defp generate_map_tasks(state) do
-    # ============================== TODO generate map tasks
-    # Lebih simple map task dibuat untuk tiap block
-    # Pastikan input data dalam bentuk format {"block_id", ["worker_pid", "worker_pid"]}
     worker_pids = ComputeOperation.get_workers()
 
     map_tasks = 1..10
-      |> Enum.map(fn task_id ->
-        worker_index = rem(task_id - 1, length(worker_pids))
-        worker_pid = Enum.at(worker_pids, worker_index)
-        block_info = {"block_#{task_id}", [worker_pid]}
-        ComputeTask.new_map(state.job.id, block_info, state.job.map_module)
-      end)
+    |> Enum.map(fn task_id ->
+      worker_index = rem(task_id - 1, length(worker_pids))
+      worker_pid = Enum.at(worker_pids, worker_index)
+      block_info = {"block_#{task_id}", [worker_pid]}
+      ComputeTask.new_map(state.job.id, block_info, state.job.map_module)
+    end)
 
     Logger.info("Generated #{length(map_tasks)} map tasks")
     %{state | map_tasks: map_tasks}
   end
 
   defp generate_reduce_tasks(state) do
-
-  # =============================== TODO generate reduce tasks
-  # Constraint Generate min(@max_number_of_reducers, length(state.shuffle_data))
-  # Kita membuat reduce tasks itu jumlahnya di kasih batas atas  @max_number_of_reducers
-  # Yang paling utama itu argument ke 2 new reduce tasks yang merupakan
-  # List of key-worker_pid pairs yang menunjukan bahwa reducer dapat list key ini dan tiap
-  # Key tersebut dapat diambil di sini
-
+    worker_pids = state.worker_process_map |> Map.keys()
 
     reduce_tasks = state.shuffle_data
-      |> Enum.map(fn {key, storage_pids} ->
-        ComputeTask.new_reduce(
-          state.job.id,
-          [{key, worker_pids}],
-          state.job.reduce_module
-        )
-      end)
-  # ===============================
+    |> Enum.take(min(@max_number_of_reducers, length(state.shuffle_data)))
+    |> Enum.map(fn {key, storage_pids} ->
+      ComputeTask.new_reduce(
+        state.job.id,
+        [{key, storage_pids}],
+        state.job.reduce_module
+      )
+    end)
 
     Logger.info("Generated #{length(reduce_tasks)} reduce tasks")
     %{state | reduce_tasks: reduce_tasks}
   end
 
-  defp dispatch_map_tasks(state) do
-    {dispatched, failed, _assignments} = dispatch_tasks(state.map_tasks, {0, 0, {state.worker_process_map, state.load_balance_runner_tree}})
-    Logger.info("Dispatched #{dispatched} map tasks, #{failed} failed")
+  # Generic task dispatch
+  defp dispatch_tasks_with_state(state, tasks_field, total_field) do
+    tasks = Map.get(state, tasks_field)
+    {dispatched, failed, _assignments} = dispatch_tasks(tasks, {0, 0, {state.worker_process_map, state.load_balance_runner_tree}})
 
-    %{state | map_tasks: nil, total_map_tasks: dispatched}
+    phase = if tasks_field == :map_tasks, do: "map", else: "reduce"
+    Logger.info("Dispatched #{dispatched} #{phase} tasks, #{failed} failed")
+
+    state
+    |> Map.put(tasks_field, [])
+    |> Map.put(total_field, dispatched)
   end
 
-  defp dispatch_reduce_tasks(state) do
-    {dispatched, failed, _assignments} = dispatch_tasks(state.reduce_tasks, {0, 0, {state.worker_process_map, state.load_balance_runner_tree}})
-    Logger.info("Dispatched #{dispatched} reduce tasks, #{failed} failed")
+  defp wait_for_phase_completion(state, phase, next_phase) do
+    total_tasks = Map.get(state, :"total_#{phase}_tasks")
 
-    %{state | reduce_tasks: nil, total_reduce_tasks: dispatched}
-  end
-
-  defp wait_for_map_completion(state) do
-    Logger.info("Waiting for map tasks to complete #{inspect(self())}")
-    if state.total_map_tasks > 0 do
-      %{state | status: :map_waiting}
+    if total_tasks > 0 do
+      %{state | status: :"#{phase}_waiting"}
     else
-      Process.send(self(), :proceed_to_shuffle, [])
+      Process.send(self(), next_phase, [])
       state
     end
   end
 
-  defp wait_for_reduce_completion(state) do
-    if state.total_reduce_tasks > 0 do
-      %{state | status: :reduce_waiting}
-    else
-      Process.send(self(), :proceed_to_completion, [])
-      state
-    end
-  end
-
+  # Notification helpers
   defp notify_phase_start(state, phase) do
     GenServer.cast(ComputeOperation, {:job_status, state.job.id, phase})
     state
@@ -532,35 +336,126 @@ defmodule MiniHadoop.Job.JobRunner do
     %{state | status: :failed}
   end
 
-  defp dispatch_tasks([], acc), do: acc
+  defp update_progress(phase, completed, failed, total, job_id) do
+    GenServer.cast(ComputeOperation, {
+      :job_progress,
+      job_id,
+      phase,
+      completed + failed,
+      total
+    })
+  end
 
+  # Utility functions
+  defp start_process_on_workers([], _job_id), do: {:error, :no_workers_provided}
+
+  defp start_process_on_workers(workers, job_id) do
+    job_runner_pid = self()
+    tasks = Enum.map(workers, fn worker_pid ->
+      Task.async(fn -> start_single_worker_async(worker_pid, job_id, job_runner_pid) end)
+    end)
+
+    results = Task.await_many(tasks, 10_000)
+    process_async_results(results, length(workers))
+  end
+
+  defp start_single_worker_async(worker_pid, job_id, job_runner_pid) do
+    try do
+      case GenServer.call(worker_pid, {:start_runner_and_storage, job_id, job_runner_pid}, 5000) do
+        {:ok, result} -> {:ok, result}
+        {:error, reason} -> {:error, reason}
+        other -> {:error, :unexpected_response}
+      end
+    rescue
+      error -> {:error, :communication_failed}
+    end
+  end
+
+  defp process_async_results(results, total_workers) do
+    {worker_runner_map, load_tree, failures} =
+      Enum.reduce(results, {%{}, :gb_trees.empty(), []}, fn
+        {:ok, {worker_pid, storage_pid, task_runner_pid}}, {worker_acc, tree_acc, failure_acc} ->
+          new_worker_acc = Map.put(worker_acc, worker_pid, {storage_pid, task_runner_pid})
+          new_tree_acc = :gb_trees.insert({0, task_runner_pid}, task_runner_pid, tree_acc)
+          {new_worker_acc, new_tree_acc, failure_acc}
+        {:exit, reason}, {worker_acc, tree_acc, failure_acc} ->
+          {worker_acc, tree_acc, [reason | failure_acc]}
+      end)
+
+    successes_count = map_size(worker_runner_map)
+    failures_count = length(failures)
+
+    cond do
+      successes_count == 0 -> {:error, :no_workers_started}
+      failures_count > 0 -> {:ok, worker_runner_map, load_tree}
+      true -> {:ok, worker_runner_map, load_tree}
+    end
+  end
+
+  defp stop_all_task_runners(worker_process_map) do
+    Enum.each(worker_process_map, fn {_worker_pid, {storage_pid, task_runner_pid}} ->
+      stop_process(task_runner_pid)
+      stop_process(storage_pid)
+    end)
+  end
+
+  defp stop_process(pid) do
+    if pid_valid?(pid) do
+      try do
+        GenServer.stop(pid, :normal, 5000)
+      rescue
+        _error -> Process.exit(pid, :kill)
+      end
+    end
+  end
+
+  defp pid_valid?(pid) do
+    try do
+      node = node(pid)
+      node == Node.self() or node in Node.list()
+    rescue
+      ArgumentError -> false
+    end
+  end
+
+  defp cleanup_after_failed_init(job_id, reason) do
+    Logger.info("Cleaning up failed init for job #{job_id}")
+    GenServer.cast(ComputeOperation, {:job_failed, job_id, reason})
+  end
+
+  @impl true
+  def terminate(reason, state) do
+    Logger.info("Job #{state.job.id} terminated: #{inspect(reason)}")
+    stop_all_task_runners(state.worker_process_map)
+  end
+
+  # Counter and task dispatch functions
+  defp initialize_counters(job_spawned_task_counter_ref) do
+    :ets.insert(job_spawned_task_counter_ref, [
+      {:completed_map_tasks, 0},
+      {:completed_reduce_tasks, 0},
+      {:failed_map_tasks, 0},
+      {:failed_reduce_tasks, 0}
+    ])
+  end
+
+  defp get_counter(job_spawned_task_counter_ref, key) do
+    [{^key, value}] = :ets.lookup(job_spawned_task_counter_ref, key)
+    value
+  end
+
+  defp dispatch_tasks([], acc), do: acc
   defp dispatch_tasks([task | remaining_tasks], {dispatched, failed, {worker_process_map, load_balance_runner_tree}}) do
     case execute_task(task, worker_process_map, load_balance_runner_tree) do
       {:ok, new_tree} ->
         dispatch_tasks(remaining_tasks, {dispatched + 1, failed, {worker_process_map, new_tree}})
-
       {:ok, :all_workers_queue_full} ->
-        Logger.debug("All workers queue are full, retrying")
         dispatch_tasks([task | remaining_tasks], {dispatched, failed, {worker_process_map, load_balance_runner_tree}})
-
-      {:error, reason} ->
-        Logger.error("Failed to dispatch task #{task.task_id}: #{reason}")
+      {:error, _reason} ->
         dispatch_tasks(remaining_tasks, {dispatched, failed + 1, {worker_process_map, load_balance_runner_tree}})
-
       {:error, :no_worker} ->
-        remaining_count = length(remaining_tasks)
-        dispatch_tasks([], {dispatched, failed + 1 + remaining_count, {worker_process_map, load_balance_runner_tree}})
+        {dispatched, failed + 1 + length(remaining_tasks), {worker_process_map, load_balance_runner_tree}}
     end
-  end
-
-  defp generate_final_results(state) do
-    %{
-      total_map_tasks: state.total_map_tasks,
-      total_reduce_tasks: state.total_reduce_tasks,
-      output_files: [
-        "/placeholder/result/#{state.job.id}.txt"
-      ]
-    }
   end
 
   defp execute_task(task, worker_process_map, load_balance_runner_tree) do
@@ -569,7 +464,6 @@ defmodule MiniHadoop.Job.JobRunner do
       {:ok, runner_pid, new_tree} ->
         GenServer.cast(runner_pid, {:execute_task, task})
         {:ok, new_tree}
-
       {:error, reason} ->
         {:error, reason}
     end)
@@ -591,16 +485,8 @@ defmodule MiniHadoop.Job.JobRunner do
       timeout: 15_000
     )
     |> Enum.reduce(%{}, fn
-      {:ok, {:ok, {storage_pid, keys}}}, acc ->
-        Map.put(acc, storage_pid, keys)
-
-      {:ok, {:error, {storage_pid, reason}}}, acc ->
-        Logger.warn("Failed to fetch keys from #{inspect(storage_pid)}: #{inspect(reason)}")
-        acc
-
-      {:exit, reason}, acc ->
-        Logger.warn("Task exited: #{inspect(reason)}")
-        acc
+      {:ok, {:ok, {storage_pid, keys}}}, acc -> Map.put(acc, storage_pid, keys)
+      _, acc -> acc
     end)
   end
 
@@ -613,68 +499,48 @@ defmodule MiniHadoop.Job.JobRunner do
       fn storage_pid ->
         case GenServer.call(storage_pid, :get_reduce_results, 10_000) do
           {:ok, results} when is_list(results) ->
-            key_value_tuples = Enum.map(results, fn {k, v} -> {k, v} end)
-            {:ok, {storage_pid, key_value_tuples}}
-
-          {:ok, other} ->
-            {:error, {storage_pid, {:invalid_format, other}}}
-
-          {:error, reason} ->
-            {:error, {storage_pid, reason}}
+            Enum.map(results, fn {k, v} -> {k, v} end)
+          _ ->
+            []
         end
       end,
       max_concurrency: length(storage_pids),
       timeout: 15_000
     )
-    |> Enum.reduce([], fn
-      {:ok, {:ok, {storage_pid, key_value_tuples}}}, acc ->
-        key_value_tuples ++ acc
-
-      {:ok, {:error, {storage_pid, reason}}}, acc ->
-        Logger.warn("Failed to fetch reduce results from #{inspect(storage_pid)}: #{inspect(reason)}")
-        acc
-
-      {:exit, reason}, acc ->
-        Logger.warn("Task exited: #{inspect(reason)}")
-        acc
+    |> Enum.flat_map(fn
+      {:ok, results} -> results  # Now 'results' is just a list, not {:ok, list}
+      _ -> []
     end)
   end
 
-  defp save_result_to_text(sorted_reduce_results, state) do
-    # save file to
+  defp generate_final_results(state) do
+    %{
+      total_map_tasks: state.total_map_tasks,
+      total_reduce_tasks: state.total_reduce_tasks,
+      output_files: ["/placeholder/result/#{state.job.id}.txt"]
+    }
   end
 
+  # Choosing worker for task
   defp choose_worker(%{type: :map, input_data: {_block_id, [worker_pid | _]}}, worker_process_map, load_balance_runner_tree) do
-    # =================================
     case Map.get(worker_process_map, worker_pid) do
       {_storage_pid, runner_pid} ->
-        # Find the current task count for this runner
         case get_runner_from_tree(load_balance_runner_tree, runner_pid) do
           {{current_count, ^runner_pid}, _value} ->
-            # Remove old entry and create new entry with incremented count
             old_tree = :gb_trees.delete({current_count, runner_pid}, load_balance_runner_tree)
             new_tree = :gb_trees.insert({current_count + 1, runner_pid}, runner_pid, old_tree)
             {:ok, runner_pid, new_tree}
-
-          nil ->
-            {:error, :runner_not_found_in_tree}
+          nil -> {:error, :runner_not_found_in_tree}
         end
-
-      nil ->
-        {:error, :worker_not_found}
+      nil -> {:error, :worker_not_found}
     end
   end
 
   defp choose_worker(%{type: :reduce}, _worker_process_map, load_balance_runner_tree) do
     case :gb_trees.is_empty(load_balance_runner_tree) do
-      true ->
-        {:error, :no_runners_available}
-
+      true -> {:error, :no_runners_available}
       false ->
-        # Take the least loaded runner
         {{current_count, runner_pid}, _value, remaining_tree} = :gb_trees.take_smallest(load_balance_runner_tree)
-
-        # Insert back with incremented count
         new_tree = :gb_trees.insert({current_count + 1, runner_pid}, runner_pid, remaining_tree)
         {:ok, runner_pid, new_tree}
     end
@@ -691,14 +557,9 @@ defmodule MiniHadoop.Job.JobRunner do
 
   defp find_runner_in_iterator(iterator, target_runner_pid) do
     case :gb_trees.next(iterator) do
-      {{count, runner_pid} = key, value, next_iterator} ->
-        if runner_pid == target_runner_pid do
-          {key, value}
-        else
-          find_runner_in_iterator(next_iterator, target_runner_pid)
-        end
-      :none ->
-        nil
+      {{_count, runner_pid} = key, value, next_iterator} ->
+        if runner_pid == target_runner_pid, do: {key, value}, else: find_runner_in_iterator(next_iterator, target_runner_pid)
+      :none -> nil
     end
   end
 end
