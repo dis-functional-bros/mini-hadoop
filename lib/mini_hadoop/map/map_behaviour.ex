@@ -1,4 +1,4 @@
-defmodule MiniHadoop.Map do
+defmodule MiniHadoop.Map.MapBehaviour do
   @moduledoc """
   Behaviour and helpers for running Map-style functions across blocks/partitions.
 
@@ -10,13 +10,10 @@ defmodule MiniHadoop.Map do
     * Use the helpers from tasks/workers to uniformly handle errors.
   """
 
-  @typedoc "Opaque context passed to user-defined Map implementations."
-  @type context :: map()
-
   @typedoc "Result returned by a Map implementation."
-  @type result :: term()
+  @type result :: [{key :: term(), value :: term()}]
 
-  @callback map(data :: binary(), context) :: result
+  @callback map(data :: binary(), any()) :: result
 
   @doc """
   Executes the provided map module with binary data and an optional context.
@@ -24,8 +21,8 @@ defmodule MiniHadoop.Map do
   Returns `{:ok, result}` when execution succeeds or `{:error, reason}` when
   the module is missing, does not implement `c:map/2`, or raises while running.
   """
-  @spec execute(module(), binary(), context) :: {:ok, result} | {:error, term()}
-  def execute(map_module, data, context \\ %{}) when is_binary(data) and is_map(context) do
+  @spec execute(module(), binary(), any()) :: {:ok, result} | {:error, term()}
+  def execute(map_module, data, context \\ %{}) when is_binary(data) do
     with :ok <- ensure_valid_module(map_module) do
       do_execute(map_module, data, context)
     end

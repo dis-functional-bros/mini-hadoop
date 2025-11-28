@@ -10,32 +10,28 @@ defmodule MiniHadoop.Models.ComputeTask do
   @type key :: any()
   @type value :: any()
   @type intermediate_data :: [{key(), [value()]}]
-  @type map_function :: (any() -> [{key(), value()}])
-  @type reduce_function :: ({key(), [value()]} -> [{key(), value()}])
 
   defstruct [
-    :task_id,
+    :id,
     :job_id,
-    :job_ref,
     :type,
     :status,
     :input_data,  # For map: {block_id=>[worker_pid]}, for reduce: [{key(), [pid()]}]
     :output_data,
-    :function,
+    :module,
     :attempt,
     :started_at,
     :completed_at
   ]
 
   @type t :: %__MODULE__{
-          task_id: String.t(),
+          id: String.t(),
           job_id: String.t(),
-          job_ref: pid(),
           type: task_type(),
           status: task_status(),
           input_data: any(),
           output_data: intermediate_data() | any(),
-          function: map_function() | reduce_function(),
+          module: module(),
           attempt: integer(),
           started_at: DateTime.t() | nil,
           completed_at: DateTime.t() | nil
@@ -54,31 +50,29 @@ defmodule MiniHadoop.Models.ComputeTask do
   end
 
   # Change spec from map to tuple
-  @spec new_map(String.t(), {String.t(), [pid()]}, map_function(), pid()) :: t()
-  def new_map(job_id, block_info, map_function, job_ref) do
+  @spec new_map(String.t(), {String.t(), [pid()]}, module()) :: t()
+  def new_map(job_id, block_info, map_module) do
     task_id = "map_#{job_id}_#{generate_id()}"
 
     new(%{
-      task_id: task_id,
+      id: task_id,
       job_id: job_id,
-      job_ref: job_ref,
       type: :map,
       input_data: block_info,  # This will now be a tuple
-      function: map_function,
+      module: map_module,
     })
   end
 
-  @spec new_reduce(String.t(), [{key(), [pid()]}], reduce_function(), pid()) :: t()
-  def new_reduce(job_id, list_of_keys_and_locations, reduce_function, job_ref) do
+  @spec new_reduce(String.t(), [{key(), [pid()]}], module()) :: t()
+  def new_reduce(job_id, list_of_keys_and_locations, reduce_module) do
     task_id = "red_#{job_id}_#{generate_id()}"
 
     new(%{
-      task_id: task_id,
+      id: task_id,
       job_id: job_id,
-      job_ref: job_ref,
       type: :reduce,
       input_data: list_of_keys_and_locations,
-      function: reduce_function
+      module: reduce_module
     })
   end
 

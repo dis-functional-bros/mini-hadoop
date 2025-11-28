@@ -4,7 +4,7 @@ defmodule MiniHadoop.Models.Block do
   Now simplified for fixed-size streaming chunks.
   """
 
-  @block_size 4 * 1024
+  @block_size Application.compile_env(:mini_hadoop, :block_size, 64 * 1024) # 64KB default
 
   # We don't need the Block struct anymore since we're just using raw binary chunks
   # But keep it if other parts of the system use it, or remove it entirely

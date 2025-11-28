@@ -4,37 +4,34 @@ defmodule MiniHadoop.Models.JobSpec do
   Represents a complete MapReduce job.
   """
 
+
   @type key :: any()
   @type value :: any()
   @type task_status :: :pending | :running | :completed | :failed
-  @type map_function :: (any() -> [{key(), value()}])
-  @type reduce_function :: ({key(), [value()]} -> [{key(), value()}])
 
   defstruct [
-    :job_id,
+    :id,
     :job_name,
     :input_files,
     :output_dir,
     :map_tasks,
     :reduce_tasks,
-    :map_function,
-    :reduce_function,
-    :num_reducers,
+    :map_module,
+    :reduce_module,
     :status,
     :created_at,
     :completed_at
   ]
 
   @type t :: %__MODULE__{
-          job_id: String.t(),
+          id: String.t(),
           job_name: String.t(),
           input_files: [String.t()],
           output_dir: String.t(),
           map_tasks: [ComputeTask.t()],
           reduce_tasks: [ComputeTask.t()],
-          map_function: map_function(),
-          reduce_function: reduce_function(),
-          num_reducers: integer(),
+          map_module: module(),
+          reduce_module: module(),
           status: task_status(),
           created_at: DateTime.t(),
           completed_at: DateTime.t() | nil
@@ -45,16 +42,15 @@ defmodule MiniHadoop.Models.JobSpec do
     attrs_map = Map.new(attrs)
 
     with {:ok, job_id} <- generate_job_id(),
-         {:ok, _} <- validate_functions(attrs_map) do
+         {:ok, _} <- validate_modules(attrs_map) do
 
       defaults = %{
-        job_id: job_id,
+        id: job_id,
         status: :pending,
         created_at: DateTime.utc_now(),
         completed_at: nil,
         map_tasks: [],
-        reduce_tasks: [],
-        num_reducers: 1
+        reduce_tasks: []
       }
 
       {:ok, struct(__MODULE__, Map.merge(defaults, attrs_map))}
@@ -82,34 +78,41 @@ defmodule MiniHadoop.Models.JobSpec do
     :crypto.strong_rand_bytes(2) |> Base.encode16(case: :lower)
   end
 
-  defp validate_functions(attrs) do
-    map_func = Map.get(attrs, :map_function)
-    reduce_func = Map.get(attrs, :reduce_function)
+  defp validate_modules(attrs) do
+    map_module = Map.get(attrs, :map_module)
+    reduce_module = Map.get(attrs, :reduce_module)
 
     cond do
-      is_nil(map_func) and is_nil(reduce_func) ->
-        {:error, "Missing both map_function and reduce_function"}
+      is_nil(map_module) and is_nil(reduce_module) ->
+        {:error, "Missing both map_module and reduce_module"}
 
-      is_nil(map_func) ->
-        {:error, "Missing map_function"}
+      is_nil(map_module) ->
+        {:error, "Missing map_module"}
 
-      is_nil(reduce_func) ->
-        {:error, "Missing reduce_function"}
+      is_nil(reduce_module) ->
+        {:error, "Missing reduce_module"}
 
-      not is_function(map_func) ->
-        {:error, "map_function must be a function"}
+      not is_atom(map_module) ->
+        {:error, "map_module must be a module"}
 
-      not is_function(reduce_func) ->
-        {:error, "reduce_function must be a function"}
+      not is_atom(reduce_module) ->
+        {:error, "reduce_module must be a module"}
 
-      :erlang.fun_info(map_func, :arity) != {:arity, 1} ->
-        {:error, "map_function must accept exactly 1 argument"}
+      not Code.ensure_loaded?(map_module) ->
+        {:error, "map_module #{inspect(map_module)} is not a loaded module"}
 
-      :erlang.fun_info(reduce_func, :arity) != {:arity, 1} ->
-        {:error, "reduce_function must accept exactly 1 argument"}
+      not Code.ensure_loaded?(reduce_module) ->
+        {:error, "reduce_module #{inspect(reduce_module)} is not a loaded module"}
+
+      # Just check if the required functions exist
+      not function_exported?(map_module, :map, 2) ->
+        {:error, "map_module #{inspect(map_module)} must export map/2 function"}
+
+      not function_exported?(reduce_module, :reduce, 2) ->
+        {:error, "reduce_module #{inspect(reduce_module)} must export reduce/2 function"}
 
       true ->
-        {:ok, :functions_valid}
+        {:ok, :modules_valid}
     end
   end
 end

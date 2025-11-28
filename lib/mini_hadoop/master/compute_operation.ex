@@ -7,6 +7,9 @@ defmodule MiniHadoop.Master.ComputeOperation do
   alias MiniHadoop.Models.JobSpec
   alias MiniHadoop.Models.JobExecution
 
+  @max_concurrent_jobs Application.get_env(:mini_hadoop, :max_concurrent_jobs, 1)
+  @max_queue_size_of_jobs Application.get_env(:mini_hadoop, :max_queue_size_of_jobs, 10)
+
   defstruct [
     # Job Specifications (immutable definitions)
     # %{job_id => JobSpec.t()}
@@ -30,10 +33,6 @@ defmodule MiniHadoop.Master.ComputeOperation do
     # %{job_id => %{started_at: DateTime.t()}}
     running_jobs: %{},
 
-    # Concurrency control
-    # Maximum jobs running simultaneously
-    max_concurrent_jobs: 1,
-
     # System metrics
     metrics: %{
       total_jobs_submitted: 0,
@@ -48,7 +47,6 @@ defmodule MiniHadoop.Master.ComputeOperation do
   end
 
   def init(opts) do
-    max_concurrent_jobs = opts[:max_concurrent_jobs] || 1
 
     state = %__MODULE__{
       job_specs: %{},
@@ -57,7 +55,6 @@ defmodule MiniHadoop.Master.ComputeOperation do
       workers: [],
       pending_jobs: :queue.new(),
       running_jobs: %{},
-      max_concurrent_jobs: max_concurrent_jobs,
       metrics: %{
         total_jobs_submitted: 0,
         total_jobs_completed: 0,
@@ -66,7 +63,7 @@ defmodule MiniHadoop.Master.ComputeOperation do
       }
     }
 
-    Logger.info("ComputeOperation started with max #{max_concurrent_jobs} concurrent jobs")
+    Logger.info("ComputeOperation started")
     {:ok, state}
   end
 
@@ -109,17 +106,21 @@ defmodule MiniHadoop.Master.ComputeOperation do
   end
 
   def handle_call({:submit_job, job_attrs}, _from, state) do
+    if :queue.len(state.pending_jobs) > @max_queue_size_of_jobs do
+      {:reply, {:error, :queue_full}, state}
+    end
+
     case JobSpec.new(job_attrs) do
       {:ok, job_spec} ->
         # Create job execution in pending state
-        job_execution = JobExecution.new(job_spec.job_id, job_spec.num_reducers)
+        job_execution = JobExecution.new(job_spec.id)
 
         # Store job spec and execution
         state = %{
           state
-          | job_specs: Map.put(state.job_specs, job_spec.job_id, job_spec),
-            job_executions: Map.put(state.job_executions, job_spec.job_id, job_execution),
-            pending_jobs: :queue.in(job_spec.job_id, state.pending_jobs),
+          | job_specs: Map.put(state.job_specs, job_spec.id, job_spec),
+            job_executions: Map.put(state.job_executions, job_spec.id, job_execution),
+            pending_jobs: :queue.in(job_spec.id, state.pending_jobs),
             metrics: %{
               state.metrics
               | total_jobs_submitted: state.metrics.total_jobs_submitted + 1
@@ -130,10 +131,10 @@ defmodule MiniHadoop.Master.ComputeOperation do
         state = start_pending_jobs(state)
 
         Logger.info(
-          "Job #{job_spec.job_id} submitted. #{:queue.len(state.pending_jobs)} jobs pending"
+          "Job #{job_spec.id} submitted. #{:queue.len(state.pending_jobs)} jobs pending"
         )
 
-        {:reply, {:ok, job_spec.job_id}, state}
+        {:reply, {:ok, job_spec.id}, state}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -164,7 +165,7 @@ defmodule MiniHadoop.Master.ComputeOperation do
     status = %{
       running_jobs: map_size(state.running_jobs),
       pending_jobs: :queue.len(state.pending_jobs),
-      max_concurrent_jobs: state.max_concurrent_jobs,
+      max_concurrent_jobs: @max_concurrent_jobs,
       active_workers: length(state.workers),
       metrics: state.metrics
     }
@@ -287,7 +288,7 @@ defmodule MiniHadoop.Master.ComputeOperation do
 
   # Private functions
   defp start_pending_jobs(state) do
-    if map_size(state.running_jobs) < state.max_concurrent_jobs and
+    if map_size(state.running_jobs) < @max_concurrent_jobs and
          not :queue.is_empty(state.pending_jobs) do
       {{:value, job_id}, pending_jobs} = :queue.out(state.pending_jobs)
       state_with_updated_queue = %{state | pending_jobs: pending_jobs}
@@ -310,7 +311,7 @@ defmodule MiniHadoop.Master.ComputeOperation do
   defp start_job_process(job_id, state) do
     job_spec = state.job_specs[job_id]
 
-    case JobSupervisor.start_job(job_spec) do
+    case JobSupervisor.start_job(job_spec, state.workers) do
       {:ok, job_pid} ->
         # Track the running job
         running_jobs =

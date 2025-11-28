@@ -1,21 +1,37 @@
+x-common-vars: &common-vars
+  MIX_ENV: dev
+  ERLANG_COOKIE: secret
+  APP_NAME: mini_hadoop
+  DATA_BASE_PATH: /app/data
+  DATA_TEMP_PATH: /app/temp
+
+x-worker-vars: &worker-vars
+  <<: *common-vars
+  NODE_TYPE: worker
+  MASTER_NODE: master@master
+
 services:
   master:
     build: .
     container_name: master_node
     hostname: master
     environment:
-      - NODE_TYPE=master
-      - MIX_ENV=dev # ← ADD THIS
+      <<: *common-vars
+      NODE_TYPE: master
+      NODE_NAME: master
     ports:
       - "4000:4000"
     command: iex --sname master --cookie secret -S mix
     stdin_open: true
     tty: true
     networks:
-      - hadoop_net
+      hadoop_net:
+        aliases:
+          - master.hadoop.internal
     volumes:
-      - ./data:/app/mini_hadoop/data
-      - ./data/shared:/shared
+      - ./data/master:/app/data
+      - ./temp/master:/app/temp
+      - ./logs/master:/app/logs
     develop:
       watch:
         - action: sync+restart
@@ -29,10 +45,10 @@ services:
     container_name: worker_node1
     hostname: worker1
     environment:
-      - NODE_TYPE=worker
-      - MASTER_NODE=master@master
-      - MIX_ENV=dev # ← ADD THIS
-    command: iex --sname worker1 --cookie secret -S mix # ← FIX: unique sname
+      <<: *worker-vars
+      NODE_NAME: worker1
+      WORKER_ID: "1"
+    command: iex --sname worker1 --cookie secret -S mix
     stdin_open: true
     tty: true
     depends_on:
@@ -40,8 +56,9 @@ services:
     networks:
       - hadoop_net
     volumes:
-      - ./data/worker1:/app/mini_hadoop/data
-      - ./data/shared:/shared
+      - ./data/worker1:/app/data
+      - ./temp/worker1:/app/temp
+      - ./logs/worker1:/app/logs
     develop:
       watch:
         - action: sync+restart
@@ -55,10 +72,10 @@ services:
     container_name: worker_node2
     hostname: worker2
     environment:
-      - NODE_TYPE=worker
-      - MASTER_NODE=master@master
-      - MIX_ENV=dev # ← ADD THIS
-    command: iex --sname worker2 --cookie secret -S mix # ← FIX: unique sname
+      <<: *worker-vars
+      NODE_NAME: worker2
+      WORKER_ID: "2"
+    command: iex --sname worker2 --cookie secret -S mix
     stdin_open: true
     tty: true
     depends_on:
@@ -66,8 +83,9 @@ services:
     networks:
       - hadoop_net
     volumes:
-      - ./data/worker2:/app/mini_hadoop/data
-      - ./data/shared:/shared
+      - ./data/worker2:/app/data
+      - ./temp/worker2:/app/temp
+      - ./logs/worker2:/app/logs
     develop:
       watch:
         - action: sync+restart
@@ -81,10 +99,10 @@ services:
     container_name: worker_node3
     hostname: worker3
     environment:
-      - NODE_TYPE=worker
-      - MASTER_NODE=master@master
-      - MIX_ENV=dev # ← ADD THIS
-    command: iex --sname worker3 --cookie secret -S mix # ← FIX: unique sname
+      <<: *worker-vars
+      NODE_NAME: worker3
+      WORKER_ID: "3"
+    command: iex --sname worker3 --cookie secret -S mix
     stdin_open: true
     tty: true
     depends_on:
@@ -92,8 +110,9 @@ services:
     networks:
       - hadoop_net
     volumes:
-      - ./data/worker3:/app/mini_hadoop/data # ← FIX: was worker2
-      - ./data/shared:/shared
+      - ./data/worker3:/app/data
+      - ./temp/worker3:/app/temp
+      - ./logs/worker3:/app/logs
     develop:
       watch:
         - action: sync+restart
@@ -107,10 +126,10 @@ services:
     container_name: worker_node4
     hostname: worker4
     environment:
-      - NODE_TYPE=worker
-      - MASTER_NODE=master@master
-      - MIX_ENV=dev # ← ADD THIS
-    command: iex --sname worker4 --cookie secret -S mix # ← FIX: unique sname
+      <<: *worker-vars
+      NODE_NAME: worker4
+      WORKER_ID: "4"
+    command: iex --sname worker4 --cookie secret -S mix
     stdin_open: true
     tty: true
     depends_on:
@@ -118,8 +137,9 @@ services:
     networks:
       - hadoop_net
     volumes:
-      - ./data/worker4:/app/mini_hadoop/data # ← FIX: was worker2
-      - ./data/shared:/shared
+      - ./data/worker4:/app/data
+      - ./temp/worker4:/app/temp
+      - ./logs/worker4:/app/logs
     develop:
       watch:
         - action: sync+restart
@@ -131,3 +151,4 @@ services:
 networks:
   hadoop_net:
     driver: bridge
+    name: hadoop_cluster_net

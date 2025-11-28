@@ -4,7 +4,6 @@ defmodule MiniHadoop.Master.MasterNode do
 
   alias MiniHadoop.Master.ComputeOperation
 
-
   def start_link(args \\ %{}) do
     GenServer.start_link(__MODULE__, args, name: __MODULE__)
   end
@@ -45,8 +44,7 @@ defmodule MiniHadoop.Master.MasterNode do
     GenServer.call(__MODULE__, {:rebuild_tree_after_deletion})
   end
 
-
-  # init untuk state
+  # ========== INIT ==========
   @impl true
   def init(_) do
     {:ok,
@@ -67,6 +65,8 @@ defmodule MiniHadoop.Master.MasterNode do
      }}
   end
 
+  # ========== HANDLE_CALL FUNCTIONS (GROUPED) ==========
+
   @impl true
   def handle_call({:register_worker, worker_state}, _from, state) do
     new_workers =
@@ -85,52 +85,24 @@ defmodule MiniHadoop.Master.MasterNode do
     {:reply, :ok, %{state | workers: new_workers, tree: new_tree}}
   end
 
-  # Complete implementation for re-replication of blocks
-  @impl true
-  def handle_call({:DOWN, worker_pid, _, _, _}, _from, state) do
-    # TODO: complete implementation of re-replication of blocks
-    block_ids = Map.get(state.worker_to_block_mapping, worker_pid, [])
-
-    # 1. Get other worker that has the block
-    # 2. Pick a new worker where the block will be replicated
-    # 3. Make a function call from the other worker to send the replicated block
-
-    # Update worker mapping
-    # new_worker_mapping = Map.put(state.worker_to_block_mapping, new_worker_state.hostname, block_ids)
-
-    # Update block mapping
-    #new_block_mapping = Map.put(state.block_to_worker_mapping, block_ids, new_worker_state.hostname)
-
-    # Delete worker from mapping
-    # new_workers = Map.delete(state.workers, worker_pid)
-
-    # Tree should be rebuilt by the update tree logic
-    # {:reply, :ok, %{state | workers: new_workers, tree: new_tree}}
-  end
-
-  @impl true
-  def handle_call(:list_worker, _from, state) do
-    {:reply, state.workers, state}
-  end
-
-  @impl true
-  def handle_call(:get_state, _from, state) do
-    {:reply, state, state}
-  end
-
   @impl true
   def handle_call({:filename_exists, filename}, _from, state) do
     {:reply, Map.has_key?(state.filename_to_blocks, filename), state}
   end
 
   @impl true
-  def handle_call(:fetch_blocks_by_filenames, _from, state) do
+  def handle_call({:fetch_blocks_by_filenames, filenames}, _from, state) do
     result =
-      Enum.reduce(state.filename_to_blocks, %{}, fn {_, block_ids}, acc ->
-        Enum.reduce(block_ids, acc, fn block_id, acc ->
-          Map.put(acc, block_id, Map.get(state.block_to_worker_mapping, block_id, []))
-        end)
+      Enum.reduce(filenames, %{}, fn filename, acc ->
+        case Map.get(state.filename_to_blocks, filename) do
+          nil -> acc
+          block_ids ->
+            Enum.reduce(block_ids, acc, fn block_id, inner_acc ->
+              Map.put(inner_acc, block_id, Map.get(state.block_to_worker_mapping, block_id, []))
+            end)
+        end
       end)
+
     {:reply, result, state}
   end
 
@@ -174,34 +146,6 @@ defmodule MiniHadoop.Master.MasterNode do
   end
 
   @impl true
-  def handle_cast({:receive_heartbeat, worker_hostname}, state) do
-    if Map.has_key?(state.workers, worker_hostname) do
-      # Syntax: Map.update!(map, key, fun). Hanya berhasil jika key ada.
-      updated_workers =
-        Map.update!(state.workers, worker_hostname, fn info ->
-          %{info | last_heartbeat: :os.system_time(:millisecond)}
-        end)
-
-      Logger.debug("Received heartbeat from #{worker_hostname}")
-      {:noreply, %{state | workers: updated_workers}}
-    else
-      Logger.warning("Received heartbeat from unknown worker #{worker_hostname}")
-      {:noreply, state}
-    end
-  end
-
-  @impl true
-  def handle_call({:rebuild_tree_after_deletion}, _from, state) do
-    {:reply, :ok, %{state | tree: rebuild_tree(state.workers)}}
-  end
-
-  def rebuild_tree(workers_map) do
-    Enum.reduce(workers_map, :gb_trees.empty(), fn {_id, info}, acc ->
-      key = {info.blocks_count, info.pid}
-      :gb_trees.insert(key, info.hostname, acc)
-    end)
-  end
-
   def handle_call({:pop_smallest, block_id}, from, state) do
     cond do
       map_size(state.workers) == 0 ->
@@ -223,31 +167,13 @@ defmodule MiniHadoop.Master.MasterNode do
           :not_found ->
             # No suitable worker found, add to queue with block_id
             new_wait_queue = :queue.in({from, block_id}, state.wait_queue)
-            # IO.puts("No suitable worker, enter queue")
             {:noreply, %{state | wait_queue: new_wait_queue}}
         end
     end
   end
 
-  defp find_smallest_excluding(tree, exclude_pids) do
-    iterator = :gb_trees.iterator(tree)
-    find_in_iterator_excluding(iterator, exclude_pids)
-  end
-
-  defp find_in_iterator_excluding(iterator, exclude_pids) do
-    case :gb_trees.next(iterator) do
-      {{block_count, worker_pid}=key, hostname, next_iterator} ->
-        if worker_pid in exclude_pids do
-          find_in_iterator_excluding(next_iterator, exclude_pids)
-        else
-          {:ok, key, hostname}
-        end
-      :none -> :not_found
-    end
-  end
-
+  @impl true
   def handle_call({:update_tree, worker_state}, _from, state) do
-
     {worker, initial_block_map, initial_worker_list} = case worker_state do
       {:store, worker} ->
         {worker, %{worker.changed_block => true}, [worker.pid]}
@@ -294,6 +220,7 @@ defmodule MiniHadoop.Master.MasterNode do
       block_to_worker_mapping: new_block_to_worker_mapping,
       worker_to_block_mapping: new_worker_to_block_mapping
     }
+
     case worker_state do
       {:store, _} ->
         # Process queue ASYNCHRONOUSLY to avoid deadlocks
@@ -304,9 +231,67 @@ defmodule MiniHadoop.Master.MasterNode do
       {:delete, _} ->
         {:reply, :ok, new_state}
     end
-
   end
 
+  @impl true
+  def handle_call({:rebuild_tree_after_deletion}, _from, state) do
+    {:reply, :ok, %{state | tree: rebuild_tree(state.workers)}}
+  end
+
+  @impl true
+  def handle_call(:list_worker, _from, state) do
+    {:reply, state.workers, state}
+  end
+
+  @impl true
+  def handle_call(:get_state, _from, state) do
+    {:reply, state, state}
+  end
+
+  # Complete implementation for re-replication of blocks
+  @impl true
+  def handle_call({:DOWN, worker_pid, _, _, _}, _from, state) do
+    # TODO: complete implementation of re-replication of blocks
+    block_ids = Map.get(state.worker_to_block_mapping, worker_pid, [])
+
+    # 1. Get other worker that has the block
+    # 2. Pick a new worker where the block will be replicated
+    # 3. Make a function call from the other worker to send the replicated block
+
+    # Update worker mapping
+    # new_worker_mapping = Map.put(state.worker_to_block_mapping, new_worker_state.hostname, block_ids)
+
+    # Update block mapping
+    #new_block_mapping = Map.put(state.block_to_worker_mapping, block_ids, new_worker_state.hostname)
+
+    # Delete worker from mapping
+    # new_workers = Map.delete(state.workers, worker_pid)
+
+    # Tree should be rebuilt by the update tree logic
+    # {:reply, :ok, %{state | workers: new_workers, tree: new_tree}}
+    {:reply, :ok, state}
+  end
+
+  # ========== HANDLE_CAST FUNCTIONS (GROUPED) ==========
+
+  @impl true
+  def handle_cast({:receive_heartbeat, worker_hostname}, state) do
+    if Map.has_key?(state.workers, worker_hostname) do
+      # Syntax: Map.update!(map, key, fun). Hanya berhasil jika key ada.
+      updated_workers =
+        Map.update!(state.workers, worker_hostname, fn info ->
+          %{info | last_heartbeat: :os.system_time(:millisecond)}
+        end)
+
+      Logger.debug("Received heartbeat from #{worker_hostname}")
+      {:noreply, %{state | workers: updated_workers}}
+    else
+      Logger.warning("Received heartbeat from unknown worker #{worker_hostname}")
+      {:noreply, state}
+    end
+  end
+
+  @impl true
   def handle_cast(:process_queue, state) do
     case :queue.out(state.wait_queue) do
       {:empty, _queue} ->
@@ -331,4 +316,29 @@ defmodule MiniHadoop.Master.MasterNode do
     end
   end
 
+  # ========== PRIVATE FUNCTIONS ==========
+
+  defp rebuild_tree(workers_map) do
+    Enum.reduce(workers_map, :gb_trees.empty(), fn {_id, info}, acc ->
+      key = {info.blocks_count, info.pid}
+      :gb_trees.insert(key, info.hostname, acc)
+    end)
+  end
+
+  defp find_smallest_excluding(tree, exclude_pids) do
+    iterator = :gb_trees.iterator(tree)
+    find_in_iterator_excluding(iterator, exclude_pids)
+  end
+
+  defp find_in_iterator_excluding(iterator, exclude_pids) do
+    case :gb_trees.next(iterator) do
+      {{block_count, worker_pid}=key, hostname, next_iterator} ->
+        if worker_pid in exclude_pids do
+          find_in_iterator_excluding(next_iterator, exclude_pids)
+        else
+          {:ok, key, hostname}
+        end
+      :none -> :not_found
+    end
+  end
 end

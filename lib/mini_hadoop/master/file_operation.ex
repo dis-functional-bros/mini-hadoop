@@ -6,8 +6,9 @@ defmodule MiniHadoop.Master.FileOperation do
   alias MiniHadoop.Master.MasterNode
 
   @default_timeout 3_000_000
-  @batch_size 100
-  @replication_factor 2
+  @batch_size Application.get_env(:mini_hadoop, :batch_size, 100)
+  @replication_factor Application.get_env(:mini_hadoop, :block_replication_factor, 2)
+  @temp_path Application.get_env(:mini_hadoop, :temp_path, "/tmp/mini_hadoop")
 
   def start_link(_) do
     GenServer.start_link(__MODULE__, %{operations: %{}, next_id: 1}, name: __MODULE__)
@@ -266,8 +267,8 @@ defmodule MiniHadoop.Master.FileOperation do
           GenServer.cast(__MODULE__, {:update_operation, task.id, task})
 
           # Create output file path
-          default_path = Path.join("/shared", task.filename)
-          :ok = File.mkdir_p("/shared")
+          default_path = Path.join(@temp_path, task.filename)
+          :ok = File.mkdir_p(@temp_path)
 
           # OPEN FILE ONCE for streaming write
           {:ok, file_handle} = File.open(default_path, [:write, :raw, :binary])

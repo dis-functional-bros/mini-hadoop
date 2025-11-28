@@ -1,4 +1,4 @@
-defmodule MiniHadoop.Reduce do
+defmodule MiniHadoop.Reduce.ReduceBehaviour do
   @moduledoc """
   Behaviour and helpers for running Reduce-style functions across grouped key-value lists.
 
@@ -9,20 +9,14 @@ defmodule MiniHadoop.Reduce do
     * Use this inside your Reduce workers or tasks for uniform error handling.
   """
 
-  @typedoc "Context map passed to user-defined Reduce implementations."
-  @type context :: map()
-
   @typedoc "Result returned by a Reduce implementation."
-  @type result :: term()
+  @type result :: [{key :: term(), value :: term()}]
 
-  @callback reduce(data :: map(), context) :: result
+  @callback reduce(data :: map(), any()) :: result
 
   # --- Public entrypoint ---
-  @spec execute(module(), map(), context) ::
-          {:ok, result} | {:error, term()}
-  def execute(reduce_module, data, context \\ %{})
-      when is_map(data) and is_map(context) do
-
+  @spec execute(module(), map(), any()) :: {:ok, result} | {:error, term()}
+  def execute(reduce_module, data, context \\ %{}) when is_map(data) do
     with :ok <- ensure_valid_module(reduce_module) do
       do_execute(reduce_module, data, context)
     end

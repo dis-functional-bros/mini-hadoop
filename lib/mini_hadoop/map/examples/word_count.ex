@@ -2,7 +2,7 @@ defmodule MiniHadoop.Map.Examples.WordCount do
   @moduledoc """
   Fungsi map yang menghitung frekuensi kata dalam teks.
   """
-  @behaviour MiniHadoop.Map
+  @behaviour MiniHadoop.Map.MapBehaviour
 
   @impl true
   def map(data, context) when is_binary(data) do

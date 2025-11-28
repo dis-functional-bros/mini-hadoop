@@ -40,13 +40,13 @@ defmodule MiniHadoop.Models.JobExecution do
           error: any() | nil
         }
 
-  @spec new(String.t(), non_neg_integer()) :: t()  # Changed: now only needs job_id
-  def new(job_id, num_reducers) do
+  @spec new(String.t()) :: t()  # Changed: now only needs job_id
+  def new(job_id) do
     %__MODULE__{
       job_id: job_id,
       status: :pending,
       created_at: DateTime.utc_now(),
-      progress: %{map: {nil, nil}, reduce: {nil, num_reducers}},
+      progress: %{map: {nil, nil}, reduce: {nil, nil}},
       map_tasks: [],
       reduce_tasks: []
     }

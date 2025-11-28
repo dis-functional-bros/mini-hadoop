@@ -7,13 +7,13 @@ defmodule MiniHadoop.Job.JobSupervisor do
   alias MiniHadoop.Job.JobRunner
 
   # Public API
-  @spec start_job(JobSpec.t()) ::
+  @spec start_job(JobSpec.t(), [pid()]) ::
         {:ok, pid()} | {:error, term()}
-  def start_job(job) do
+  def start_job(job, workers) do
     child_spec = %{
-      id: MiniHadoop.Job.JobRunner,
-      start: {MiniHadoop.Job.JobRunner, :start_link, [job]},
-      restart: :temporary
+      id: {MiniHadoop.Job.JobRunner, job.id},
+      start: {MiniHadoop.Job.JobRunner, :start_link, [job, workers]},
+      restart: :transient # restart if abnormal termination
     }
     DynamicSupervisor.start_child(__MODULE__, child_spec)
   end
