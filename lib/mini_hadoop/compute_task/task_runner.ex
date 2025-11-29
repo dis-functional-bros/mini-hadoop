@@ -2,8 +2,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
   use GenServer
   require Logger
 
-  @max_concurrent_tasks_on_runner Application.get_env(:mini_hadoop, :max_concurrent_compute_tasks, 4)
-  @max_queue_size_of_task_runner Application.get_env(:mini_hadoop, :max_queue_size_of_task_runner, 20)
+  @max_concurrent_tasks_on_runner Application.compile_env(:mini_hadoop, :max_concurrent_compute_tasks, 4)
 
   def start_link(job_id, job_pid, storage_pid) do
     GenServer.start_link(__MODULE__, {job_id, job_pid, storage_pid})
@@ -27,6 +26,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
     }}
   end
 
+  @impl true
   def handle_call(:get_status, _from, state) do
     [{:current_tasks, current}] = :ets.lookup(state.counters_table, :current_tasks)
 
@@ -38,7 +38,8 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
   end
 
   # When: Task arrive
-  def handle_cast({:execute_task, task}, state) do
+  @impl true
+  def handle_info({:execute_task, task}, state) do
     if concurrent_tasks_under_limit?(state) do
       {:noreply, execute_task_immediately(state, task)}
     else
@@ -112,7 +113,8 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
   end
 
   defp execute_task_logic(task) do
-    Process.sleep(4000)
+    # Sleep between 2-6 seconds
+    Process.sleep(:rand.uniform(5000) + 50)
     case fetch_task_data(task) do
       {:ok, :map, map_input} ->
         execute_map_task(map_input, task.module, %{})
@@ -125,8 +127,95 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
 
   defp fetch_task_data(task) do
     case task.type do
-      :map -> {:ok, :map, "Dummy data dummy data dummy data dummy data dummy data dummy data"}
-      :reduce -> {:ok, :reduce, %{"dummy"=>[4,5,7,3], "data"=>[1,2,3,4], "more_data"=>[5,6,7,8]}}
+      :map ->
+          # complete implementation
+          # case fetch_block_data (task.input_data) do
+          #
+          #
+          # end
+
+
+          # dummy data for testing
+          {:ok, :map, """
+            To be or not to be, that is the question: Whether 'tis nobler in the mind to suffer the slings and arrows of outrageous fortune, or to take arms against a sea of troubles and by opposing end them.
+            The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! The five boxing wizards jump quickly.
+            In a hole in the ground there lived a hobbit. Not a nasty, dirty, wet hole, filled with the ends of worms and an oozy smell, nor yet a dry, bare, sandy hole with nothing in it to sit down on or to eat: it was a hobbit-hole, and that means comfort.
+            To be or not to be, that is the question: Whether 'tis nobler in the mind to suffer the slings and arrows of outrageous fortune, or to take arms against a sea of troubles and by opposing end them.
+            The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! The five boxing wizards jump quickly.
+            In a hole in the ground there lived a hobbit. Not a nasty, dirty, wet hole, filled with the ends of worms and an oozy smell, nor yet a dry, bare, sandy hole with nothing in it to sit down on or to eat: it was a hobbit-hole, and that means comfort.
+            To be or not to be, that is the question: Whether 'tis nobler in the mind to suffer the slings and arrows of outrageous fortune, or to take arms against a sea of troubles and by opposing end them.
+            The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! The five boxing wizards jump quickly.
+            In a hole in the ground there lived a hobbit. Not a nasty, dirty, wet hole, filled with the ends of worms and an oozy smell, nor yet a dry, bare, sandy hole with nothing in it to sit down on or to eat: it was a hobbit-hole, and that means comfort.
+            To be or not to be, that is the question: Whether 'tis nobler in the mind to suffer the slings and arrows of outrageous fortune, or to take arms against a sea of troubles and by opposing end them.
+            The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! The five boxing wizards jump quickly.
+            In a hole in the ground there lived a hobbit. Not a nasty, dirty, wet hole, filled with the ends of worms and an oozy smell, nor yet a dry, bare, sandy hole with nothing in it to sit down on or to eat: it was a hobbit-hole, and that means comfort.
+            To be or not to be, that is the question: Whether 'tis nobler in the mind to suffer the slings and arrows of outrageous fortune, or to take arms against a sea of troubles and by opposing end them.
+            The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! The five boxing wizards jump quickly.
+            In a hole in the ground there lived a hobbit. Not a nasty, dirty, wet hole, filled with the ends of worms and an oozy smell, nor yet a dry, bare, sandy hole with nothing in it to sit down on or to eat: it was a hobbit-hole, and that means comfort.
+            """
+            }
+      :reduce ->
+        case fetch_all_value_of_keys(task.input_data) do
+          {:ok, values} -> {:ok, :reduce, values}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  # TODO: implement fetching block data for map.
+  @spec fetch_block_data({String.t(), [pid()]}) :: {:ok, any()} | {:error, any()}
+  def fetch_block_data({block_id, storage_pids}) do
+    # just do a simple network call  to fetch the data
+
+  end
+
+  @spec fetch_all_value_of_keys([{String.t(), [pid()]}]) :: {:ok, %{String.t() => [any()]}} | {:error, any()}
+  def fetch_all_value_of_keys(input) do
+    # Build storage -> keys mapping
+    storage_to_keys_map = Enum.reduce(input, %{}, fn {key, storage_pids}, acc ->
+      Enum.reduce(storage_pids, acc, fn storage_pid, inner_acc ->
+        Map.update(inner_acc, storage_pid, [key], &[key | &1])
+      end)
+    end)
+
+    # Fetch from all storages concurrently
+    storage_results =
+      storage_to_keys_map
+      |> Task.async_stream(fn {storage_pid, keys} ->
+          case GenServer.call(storage_pid, {:get_values_of_keys, keys}) do
+            {:ok, values_map} -> {:ok, storage_pid, values_map}
+            {:error, reason} -> {:error, storage_pid, reason}
+          end
+        end,
+        timeout: 30_000,
+        max_concurrency: 100
+      )
+      |> Enum.reduce_while(%{}, fn
+        {:ok, {:ok, storage_pid, values_map}}, acc ->
+          {:cont, Map.put(acc, storage_pid, values_map)}
+
+        {:ok, {:error, storage_pid, reason}}, _acc ->
+          {:halt, {:error, "Storage #{inspect(storage_pid)} failed: #{inspect(reason)}"}}
+
+        {:exit, reason}, _acc ->
+          {:halt, {:error, "Task failed: #{inspect(reason)}"}}
+      end)
+
+    case storage_results do
+      {:error, reason} ->
+        {:error, reason}
+
+      storage_results_map ->
+        # Reconstruct results efficiently
+        result_map = Enum.reduce(input, %{}, fn {key, storage_pids}, acc ->
+          values = Enum.flat_map(storage_pids, fn storage_pid ->
+            Map.get(storage_results_map, storage_pid, %{})
+            |> Map.get(key, [])
+          end)
+          Map.put(acc, key, values)
+        end)
+
+        {:ok, result_map}
     end
   end
 

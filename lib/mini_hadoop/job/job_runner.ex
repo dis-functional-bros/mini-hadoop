@@ -5,8 +5,7 @@ defmodule MiniHadoop.Job.JobRunner do
   alias MiniHadoop.Models.ComputeTask
   alias MiniHadoop.Master.ComputeOperation
 
-  @max_number_of_reducers Application.get_env(:mini_hadoop, :max_number_of_reducers, 10)
-  @temp_path Application.get_env(:mini_hadoop, :temp_path, "/tmp/mini_hadoop")
+  @max_key_each_reduce_task Application.compile_env(:mini_hadoop, :max_num_of_key_each_reduce_task)
 
   defstruct [
     :job,
@@ -20,7 +19,8 @@ defmodule MiniHadoop.Job.JobRunner do
     :total_reduce_tasks,
     :worker_process_map,
     :load_balance_runner_tree,
-    :job_spawned_task_counter_ref
+    :job_spawned_task_counter_ref,
+    :result_path
   ]
 
   def start_link(job, participating_workers) do
@@ -29,6 +29,9 @@ defmodule MiniHadoop.Job.JobRunner do
 
   @impl true
   def init({job, participating_workers}) do
+
+    result_path = Application.get_env(:mini_hadoop, :data_base_path, "/app/data/")
+
     job_spawned_task_counter_ref = :ets.new(nil, [:set, :private])
     initialize_counters(job_spawned_task_counter_ref)
 
@@ -36,7 +39,10 @@ defmodule MiniHadoop.Job.JobRunner do
       {:ok, worker_runner_map, load_tree} ->
         state = %__MODULE__{
           job: job,
-          status: :starting,
+          map_tasks: [],
+          reduce_tasks: [],
+          participating_blocks: [],
+          shuffle_data: [],
           worker_process_map: worker_runner_map,
           load_balance_runner_tree: load_tree,
           started_at: DateTime.utc_now(),
@@ -44,7 +50,8 @@ defmodule MiniHadoop.Job.JobRunner do
           total_reduce_tasks: 0,
           map_tasks: [],
           reduce_tasks: [],
-          job_spawned_task_counter_ref: job_spawned_task_counter_ref
+          job_spawned_task_counter_ref: job_spawned_task_counter_ref,
+          result_path: result_path
         }
 
         GenServer.cast(ComputeOperation, {:job_started, job.id})
@@ -65,27 +72,28 @@ defmodule MiniHadoop.Job.JobRunner do
       |> notify_phase_start(phase_type)
       |> data_fetcher.()
       |> (fn state_with_data ->
-            # Get data list based on phase type
-            Logger.info("Executing phase: #{phase_type}")
-            data_list = case phase_type do
-              :map -> Map.get(state_with_data, :participating_blocks)
-              :reduce -> Map.get(state_with_data, :shuffle_data)
+            {data_list, chunk_size} = case phase_type do
+              :map ->
+                {Map.get(state_with_data, :participating_blocks), Map.size(state_with_data.worker_process_map)* 5}
+
+              :reduce ->
+                reduce_chunk_size = @max_key_each_reduce_task * Map.size(state_with_data.worker_process_map) * 5
+                {Map.get(state_with_data, :shuffle_data), reduce_chunk_size}
             end
 
-
-            # Process in chunks to save memory
-            chunk_size = 10
-
+            # Lazyly evaluated
             data_list
-            |> Enum.chunk_every(chunk_size)
-            |> Enum.reduce(state_with_data, fn chunk, acc ->
-              # Generate and dispatch tasks for this chunk only
-              acc
-              |> Map.put(:current_chunk, chunk)
-              |> task_generator.()
-              |> task_dispatcher.()
-              |> Map.delete(:current_chunk)  # Free memory after dispatch
+            |> Stream.chunk_every(chunk_size)
+            |> Stream.each(fn chunk ->
+              Task.start(fn ->
+                state_with_data
+                |> Map.put(:current_chunk, chunk)
+                |> then(&task_generator.(&1))
+                |> then(&task_dispatcher.(&1))
+              end)
             end)
+            |> Stream.run()
+            state_with_data
           end).()
       |> completion_checker.()
     end)
@@ -162,13 +170,50 @@ defmodule MiniHadoop.Job.JobRunner do
 
   def handle_info(:proceed_to_completion, state) do
     Logger.info("Job #{state.job.id}: Proceeding to completion")
-    reduce_results = fetch_all_reduce_results(state)
-    Logger.info("Fetched #{length(reduce_results)} reduce result entries")
 
-    # sorted_reduce_results = Enum.sort_by(reduce_results, &elem(&1, 1))
-    final_state = notify_job_completion(state)
+    result = state
+      |> fetch_all_reduce_results()
+      |> process_reduce_results()
+      |> write_results_to_file(state.result_path, state.job.id)
+      |> create_job_summary(state)
+    final_state = notify_job_completion(state, result)
     {:stop, :normal, final_state}
   end
+
+  defp process_reduce_results(reduce_results) do
+    # reduce result
+    Enum.sort_by(reduce_results, fn {_key, value} -> value end, :desc)
+  end
+
+  defp write_results_to_file(reduce_results, result_path, job_id) do
+    file_path = result_path <> "/result_#{job_id}.txt"
+    directory = Path.dirname(file_path)
+
+    File.mkdir_p!(directory)
+
+    reduce_results
+    |> Enum.map(fn {key, value} -> %{key => value} end)  # Convert to maps
+    |> Jason.encode!(pretty: true)
+    |> then(&File.write(file_path, &1))
+    |> case do
+      :ok ->
+        Logger.info("Job #{job_id}: Results written to #{file_path}")
+        file_path
+
+      {:error, reason} ->
+        Logger.error("Job #{job_id}: Failed to write results to file: #{reason}")
+        nil
+    end
+  end
+
+  defp create_job_summary(results_file_path, state) do
+    %{
+      total_map_tasks: state.total_map_tasks,
+      total_reduce_tasks: state.total_reduce_tasks,
+      job_results: results_file_path
+    }
+  end
+
 
   def handle_info({:job_failed, error}, state) do
     Logger.error("Job #{state.job.id} failed: #{inspect(error)}")
@@ -177,8 +222,9 @@ defmodule MiniHadoop.Job.JobRunner do
   end
 
   def handle_info({:DOWN, _ref, :process, dead_worker_pid, reason}, state) do
-    Logger.error("Worker died: #{inspect(dead_worker_pid)}, reason: #{reason}")
-    {:noreply, state}
+    Logger.error("Worker died: #{inspect(dead_worker_pid)}, reason: #{reason}, restarting jobs")
+
+    {:, }
   end
 
   def handle_info(msg, state) do
@@ -193,7 +239,7 @@ defmodule MiniHadoop.Job.JobRunner do
       :map,
       &fetch_participating_blocks/1,
       &generate_map_tasks/1,
-      &dispatch_tasks_with_state(&1, :map_tasks, :total_map_tasks),
+      &dispatch_tasks_with_state(&1, :map_tasks),
       &wait_for_phase_completion(&1, :map, :proceed_to_reduce)
     )
   end
@@ -204,7 +250,7 @@ defmodule MiniHadoop.Job.JobRunner do
       :reduce,
       &fetch_shuffle_data/1,
       &generate_reduce_tasks/1,
-      &dispatch_tasks_with_state(&1, :reduce_tasks, :total_reduce_tasks),
+      &dispatch_tasks_with_state(&1, :reduce_tasks),
       &wait_for_phase_completion(&1, :reduce, :proceed_to_completion)
     )
   end
@@ -230,20 +276,36 @@ defmodule MiniHadoop.Job.JobRunner do
     check_completion(state, :reduce, completed, failed, state.total_reduce_tasks, :proceed_to_completion)
   end
 
-  # Data fetching with chunk processing
+  # TODO
+  # ======================================================
+  @spec fetch_participating_blocks(%{job: %{input_data: [String.t()]}}) :: %{
+    participating_blocks: [{String.t(), [pid()]}],
+    total_map_tasks: integer()
+  }
   defp fetch_participating_blocks(state) do
+    # The main result of this function is a list of participating blocks and where are they stored.
+    # participating_blocks: [{"block_1", [worker_1]}, {"block_2", [worker_2]}]
+
+    # ----------------------------------------------------
+    # Dummy data for testing purposes
     Logger.info("Fetching participating blocks")
-    worker =state.worker_process_map |> Map.keys()
-    participating_blocks = [{"block_1", [Enum.random(worker)]}, {"block_2", [Enum.random(worker)]}, {"block_3", [Enum.random(worker)]}]
-    %{state | participating_blocks: participating_blocks}
+    workers =state.worker_process_map |> Map.keys()
+    participating_blocks =
+      1..10 |> Enum.map(fn i ->
+        worker_count = Enum.random(1..2)
+        worker_list = Enum.take_random(workers, worker_count)
+        {"block_#{i}", worker_list}
+      end)
+    total_map_tasks = Enum.count(participating_blocks)
+    Logger.info("Will generate #{total_map_tasks} map tasks")
+    # ----------------------------------------------------
+
+    %{state | participating_blocks: participating_blocks, total_map_tasks: total_map_tasks}
   end
 
+  @spec fetch_shuffle_data(%{}) :: map()
   defp fetch_shuffle_data(state) do
-    Logger.info("Fetching shuffle data (unique keys from storage)")
     unique_keys_by_storage = fetch_all_unique_keys(state)
-    Logger.info("Found #{map_size(unique_keys_by_storage)} storage nodes with keys")
-
-    # Build reverse map: key -> [storage_pids]
     shuffle_data = unique_keys_by_storage
     |> Enum.flat_map(fn {storage_pid, keys} ->
       MapSet.to_list(keys)
@@ -252,21 +314,19 @@ defmodule MiniHadoop.Job.JobRunner do
     |> Enum.group_by(fn {key, _} -> key end, fn {_, storage_pid} -> storage_pid end)
     |> Enum.map(fn {key, storage_pids} -> {key, storage_pids} end)
 
-    Logger.info("Created shuffle data with #{length(shuffle_data)} unique keys")
-    %{state | shuffle_data: shuffle_data}
+    total_reduce_tasks = ceil(Enum.count(shuffle_data) / @max_key_each_reduce_task)
+
+    Logger.info("Will generate #{total_reduce_tasks} reduce tasks")
+    %{state | shuffle_data: shuffle_data, total_reduce_tasks: total_reduce_tasks}
   end
+
 
 
   # Task generation
   defp generate_map_tasks(state) do
-    worker_pids = ComputeOperation.get_workers()
-
-    map_tasks = 1..10
-    |> Enum.map(fn task_id ->
-      worker_index = rem(task_id - 1, length(worker_pids))
-      worker_pid = Enum.at(worker_pids, worker_index)
-      block_info = {"block_#{task_id}", [worker_pid]}
-      ComputeTask.new_map(state.job.id, block_info, state.job.map_module)
+    map_tasks = state.current_chunk
+    |> Enum.map(fn {_block_id, _workers_pids} = input_data  ->
+      ComputeTask.new_map(state.job.id, input_data, state.job.map_module)
     end)
 
     Logger.info("Generated #{length(map_tasks)} map tasks")
@@ -274,16 +334,10 @@ defmodule MiniHadoop.Job.JobRunner do
   end
 
   defp generate_reduce_tasks(state) do
-    worker_pids = state.worker_process_map |> Map.keys()
-
-    reduce_tasks = state.shuffle_data
-    |> Enum.take(min(@max_number_of_reducers, length(state.shuffle_data)))
-    |> Enum.map(fn {key, storage_pids} ->
-      ComputeTask.new_reduce(
-        state.job.id,
-        [{key, storage_pids}],
-        state.job.reduce_module
-      )
+    reduce_tasks = state.current_chunk
+    |> Enum.chunk_every(@max_key_each_reduce_task)
+    |> Enum.map(fn keys ->
+      ComputeTask.new_reduce(state.job.id, keys, state.job.reduce_module)
     end)
 
     Logger.info("Generated #{length(reduce_tasks)} reduce tasks")
@@ -291,16 +345,15 @@ defmodule MiniHadoop.Job.JobRunner do
   end
 
   # Generic task dispatch
-  defp dispatch_tasks_with_state(state, tasks_field, total_field) do
+  defp dispatch_tasks_with_state(state, tasks_field) do
+    Logger.info("Start dispatching #{tasks_field}")
     tasks = Map.get(state, tasks_field)
     {dispatched, failed, _assignments} = dispatch_tasks(tasks, {0, 0, {state.worker_process_map, state.load_balance_runner_tree}})
 
     phase = if tasks_field == :map_tasks, do: "map", else: "reduce"
     Logger.info("Dispatched #{dispatched} #{phase} tasks, #{failed} failed")
-
     state
     |> Map.put(tasks_field, [])
-    |> Map.put(total_field, dispatched)
   end
 
   defp wait_for_phase_completion(state, phase, next_phase) do
@@ -325,9 +378,8 @@ defmodule MiniHadoop.Job.JobRunner do
     state
   end
 
-  defp notify_job_completion(state) do
-    results = generate_final_results(state)
-    GenServer.cast(ComputeOperation, {:job_completed, state.job.id, results})
+  defp notify_job_completion(state, result) do
+    GenServer.cast(ComputeOperation, {:job_completed, state.job.id, result})
     %{state | status: :completed}
   end
 
@@ -444,31 +496,6 @@ defmodule MiniHadoop.Job.JobRunner do
     value
   end
 
-  defp dispatch_tasks([], acc), do: acc
-  defp dispatch_tasks([task | remaining_tasks], {dispatched, failed, {worker_process_map, load_balance_runner_tree}}) do
-    case execute_task(task, worker_process_map, load_balance_runner_tree) do
-      {:ok, new_tree} ->
-        dispatch_tasks(remaining_tasks, {dispatched + 1, failed, {worker_process_map, new_tree}})
-      {:ok, :all_workers_queue_full} ->
-        dispatch_tasks([task | remaining_tasks], {dispatched, failed, {worker_process_map, load_balance_runner_tree}})
-      {:error, _reason} ->
-        dispatch_tasks(remaining_tasks, {dispatched, failed + 1, {worker_process_map, load_balance_runner_tree}})
-      {:error, :no_worker} ->
-        {dispatched, failed + 1 + length(remaining_tasks), {worker_process_map, load_balance_runner_tree}}
-    end
-  end
-
-  defp execute_task(task, worker_process_map, load_balance_runner_tree) do
-    choose_worker(task, worker_process_map, load_balance_runner_tree)
-    |> then(fn
-      {:ok, runner_pid, new_tree} ->
-        GenServer.cast(runner_pid, {:execute_task, task})
-        {:ok, new_tree}
-      {:error, reason} ->
-        {:error, reason}
-    end)
-  end
-
   defp fetch_all_unique_keys(state) do
     storage_pids = Map.values(state.worker_process_map)
                    |> Enum.map(fn {storage_pid, _runner_pid} -> storage_pid end)
@@ -513,43 +540,93 @@ defmodule MiniHadoop.Job.JobRunner do
     end)
   end
 
-  defp generate_final_results(state) do
-    %{
-      total_map_tasks: state.total_map_tasks,
-      total_reduce_tasks: state.total_reduce_tasks,
-      output_files: ["/placeholder/result/#{state.job.id}.txt"]
-    }
+
+  defp dispatch_tasks([], acc), do: acc
+  defp dispatch_tasks([task | remaining_tasks], {dispatched, failed, {worker_process_map, load_balance_runner_tree}}) do
+    case execute_task(task, worker_process_map, load_balance_runner_tree) do
+      {:ok, new_tree} ->
+        dispatch_tasks(remaining_tasks, {dispatched + 1, failed, {worker_process_map, new_tree}})
+      {:ok, :all_workers_overloaded} ->
+        # All workers are overloaded, retrying dispatch
+        :timer.sleep(1000) # Small delay
+        dispatch_tasks([task | remaining_tasks], {dispatched, failed, {worker_process_map, load_balance_runner_tree}})
+      {:error, _reason} ->
+        dispatch_tasks(remaining_tasks, {dispatched, failed + 1, {worker_process_map, load_balance_runner_tree}})
+    end
   end
 
-  # Choosing worker for task
-  defp choose_worker(%{type: :map, input_data: {_block_id, [worker_pid | _]}}, worker_process_map, load_balance_runner_tree) do
-    case Map.get(worker_process_map, worker_pid) do
-      {_storage_pid, runner_pid} ->
-        case get_runner_from_tree(load_balance_runner_tree, runner_pid) do
-          {{current_count, ^runner_pid}, _value} ->
-            old_tree = :gb_trees.delete({current_count, runner_pid}, load_balance_runner_tree)
-            new_tree = :gb_trees.insert({current_count + 1, runner_pid}, runner_pid, old_tree)
-            {:ok, runner_pid, new_tree}
-          nil -> {:error, :runner_not_found_in_tree}
+  defp execute_task(task, worker_process_map, load_balance_runner_tree) do
+    execute_task_with_backpressure(task, worker_process_map, load_balance_runner_tree, load_balance_runner_tree)
+  end
+
+  defp execute_task_with_backpressure(task, worker_process_map, original_tree, remaining_tree) do
+    cond do
+      map_size(worker_process_map) == 0 ->
+        {:error, :no_workers_configured}
+
+      :gb_trees.is_empty(remaining_tree) ->
+        {:ok, :all_workers_overloaded}
+
+      true ->
+        case choose_worker_from_remaining(task, worker_process_map, remaining_tree) do
+          {:ok, runner_pid, new_remaining_tree} ->
+            case Process.send(runner_pid, {:execute_task, task}, [:nosuspend]) do
+              :ok ->
+                # Successfully sent task to worker
+                case get_runner_from_tree(original_tree, runner_pid) do
+                  {{current_count, ^runner_pid}, _value} ->
+                    # Remove old entry and insert with incremented count
+                    old_tree = :gb_trees.delete({current_count, runner_pid}, original_tree)
+                    new_tree = :gb_trees.insert({current_count + 1, runner_pid}, runner_pid, old_tree)
+                    {:ok, new_tree}
+                  nil ->
+                    {:error, :runner_not_found_in_original_tree}
+                end
+              :nosuspend ->
+                # Chosen worker is overloaded, try another one from the remaining tree
+                execute_task_with_backpressure(task, worker_process_map, original_tree, new_remaining_tree)
+              :noconnect ->
+                {:error, :no_connection}
+            end
+          {:error, reason} ->
+            {:error, reason}
         end
-      nil -> {:error, :worker_not_found}
     end
   end
 
-  defp choose_worker(%{type: :reduce}, _worker_process_map, load_balance_runner_tree) do
-    case :gb_trees.is_empty(load_balance_runner_tree) do
-      true -> {:error, :no_runners_available}
+  # TODO: stil need to add logic data locality with ability to choose worker that is not local to block
+  # Currently it just choose the first worker where block is stored.
+  defp choose_worker_from_remaining(%{type: :map, input_data: {_block_id, [worker_pid | _]}}, worker_process_map, remaining_tree) do
+      case Map.get(worker_process_map, worker_pid) do
+        {_storage_pid, runner_pid} ->
+          case get_runner_from_tree(remaining_tree, runner_pid) do
+            {{current_count, ^runner_pid}, _value} ->
+              # Remove from remaining tree and return with updated count
+              updated_tree = :gb_trees.delete({current_count, runner_pid}, remaining_tree)
+              {:ok, runner_pid, updated_tree}
+            nil ->
+              {:error, :runner_not_found_in_tree}
+          end
+        nil ->
+          {:error, :worker_not_found}
+      end
+  end
+
+  defp choose_worker_from_remaining(%{type: :reduce}, _worker_process_map, remaining_tree) do
+    case :gb_trees.is_empty(remaining_tree) do
+      true ->
+        {:error, :no_more_workers}
       false ->
-        {{current_count, runner_pid}, _value, remaining_tree} = :gb_trees.take_smallest(load_balance_runner_tree)
-        new_tree = :gb_trees.insert({current_count + 1, runner_pid}, runner_pid, remaining_tree)
-        {:ok, runner_pid, new_tree}
+        {{current_count, runner_pid}, _value, new_remaining_tree} = :gb_trees.take_smallest(remaining_tree)
+        {:ok, runner_pid, new_remaining_tree}
     end
   end
 
-  defp choose_worker(_task, _worker_process_map, _load_balance_runner_tree) do
+  defp choose_worker_from_remaining(_task, _worker_process_map, _remaining_tree) do
     {:error, "Invalid task structure"}
   end
 
+  # Keep your existing helper functions
   defp get_runner_from_tree(tree, target_runner_pid) do
     iterator = :gb_trees.iterator(tree)
     find_runner_in_iterator(iterator, target_runner_pid)
@@ -562,4 +639,5 @@ defmodule MiniHadoop.Job.JobRunner do
       :none -> nil
     end
   end
+
 end

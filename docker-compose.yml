@@ -29,7 +29,7 @@ services:
         aliases:
           - master.hadoop.internal
     volumes:
-      - ./data/master:/app/data
+      - ./job_results:/app/data
       - ./temp/master:/app/temp
       - ./logs/master:/app/logs
     develop:
