@@ -19,6 +19,8 @@ services:
       <<: *common-vars
       NODE_TYPE: master
       NODE_NAME: master
+      RETRIVE_RESULT_PATH: /app/retrieved_files
+
     ports:
       - "4000:4000"
     command: iex --sname master --cookie secret -S mix
@@ -30,6 +32,7 @@ services:
           - master.hadoop.internal
     volumes:
       - ./job_results:/app/data
+      - ./retrieved_files:/app/retrieved_files
       - ./temp/master:/app/temp
       - ./logs/master:/app/logs
     develop:

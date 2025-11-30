@@ -8,7 +8,7 @@ defmodule MiniHadoop.Master.FileOperation do
   @default_timeout 3_000_000
   @batch_size Application.get_env(:mini_hadoop, :batch_size, 100)
   @replication_factor Application.get_env(:mini_hadoop, :block_replication_factor, 2)
-  @temp_path Application.get_env(:mini_hadoop, :temp_path, "/tmp/mini_hadoop")
+
 
   def start_link(_) do
     GenServer.start_link(__MODULE__, %{operations: %{}, next_id: 1}, name: __MODULE__)
@@ -33,7 +33,8 @@ defmodule MiniHadoop.Master.FileOperation do
   end
 
   def init(_) do
-    {:ok, %{operations: %{}, next_id: 1}}
+    retrieve_result_path = Application.get_env(:mini_hadoop, :retrieve_result_path)
+    {:ok, %{operations: %{}, next_id: 1, retrieve_result_path: retrieve_result_path}}
   end
 
   def handle_cast({:update_operation, operation_id, operation_new_state}, state) do
@@ -102,7 +103,7 @@ defmodule MiniHadoop.Master.FileOperation do
     Task.start(fn ->
       case type do
         :store -> execute_store_operation(task)
-        :retrieve -> execute_retrieve_operation(task)
+        :retrieve -> execute_retrieve_operation(task, new_state.retrieve_result_path)
         :delete -> execute_delete_operation(task)
       end
     end)
@@ -250,7 +251,7 @@ defmodule MiniHadoop.Master.FileOperation do
     end
   end
 
-  defp execute_retrieve_operation(task) do
+  defp execute_retrieve_operation(task, retrieve_result_path) do
     task = FileTask.mark_running(task, "Finding blocks for file")
     GenServer.cast(__MODULE__, {:update_operation, task.id, task})
 
@@ -267,8 +268,8 @@ defmodule MiniHadoop.Master.FileOperation do
           GenServer.cast(__MODULE__, {:update_operation, task.id, task})
 
           # Create output file path
-          default_path = Path.join(@temp_path, task.filename)
-          :ok = File.mkdir_p(@temp_path)
+          default_path = Path.join(retrieve_result_path, task.filename)
+          :ok = File.mkdir_p(retrieve_result_path)
 
           # OPEN FILE ONCE for streaming write
           {:ok, file_handle} = File.open(default_path, [:write, :raw, :binary])

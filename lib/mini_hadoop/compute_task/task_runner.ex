@@ -2,6 +2,8 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
   use GenServer
   require Logger
 
+  alias MiniHadoop.Models.ComputeTask
+
   @max_concurrent_tasks_on_runner Application.compile_env(:mini_hadoop, :max_concurrent_compute_tasks, 4)
 
   def start_link(job_id, job_pid, storage_pid) do
@@ -10,7 +12,6 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
 
   @impl true
   def init({job_id, job_pid, storage_pid}) do
-    # Create anonymous ETS tables
     counters_table = :ets.new(nil, [:set, :private])
     :ets.insert(counters_table, {:current_tasks, 0})
 
@@ -21,7 +22,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
       job_pid: job_pid,
       storage_pid: storage_pid,
       pending_tasks: :queue.new(),
-      counters_table: counters_table,      # Store table references
+      counters_table: counters_table,
       task_refs_table: task_refs_table
     }}
   end
@@ -48,22 +49,36 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
   end
 
    # When: Task completes successfully
-   def handle_info({task_ref, {ref, task, result}}, state) when is_reference(task_ref) do
+   def handle_info({task_ref, {:success, ref, task}}, state) when is_reference(task_ref) do
      :ets.delete(state.task_refs_table, ref)
-     {:noreply, handle_task_completion(state, task, result)}
+     {:noreply, handle_task_completion(state, task)}
    end
 
-   # When: Normal process shutdown (ignore)
-   def handle_info({:DOWN, _ref, :process, _pid, :normal}, state) do
-     {:noreply, state}
+   # When: Expected task failure
+   def handle_info({task_ref, {:error, ref, task}}, state) when is_reference(task_ref) do
+     :ets.delete(state.task_refs_table, ref)
+     {:noreply, handle_task_failure(state, task.id, task.error)}
    end
 
-   # When: Task fails with reason
+   # When: Normal process shutdown for completed tasks (cleanup)
+   def handle_info({:DOWN, ref, :process, _pid, :normal}, state) do
+     case :ets.lookup(state.task_refs_table, ref) do
+       [{^ref, _task_id}] ->
+         # Still in ETS? Clean it up (shouldn't happen but defensive)
+         :ets.delete(state.task_refs_table, ref)
+         {:noreply, state}
+       [] ->
+         # Already cleaned up - perfect
+         {:noreply, state}
+     end
+   end
+
+   # When: Unexpected process shutdown
    def handle_info({:DOWN, ref, :process, _pid, reason}, state) when is_reference(ref) do
      case :ets.lookup(state.task_refs_table, ref) do
        [{^ref, task_id}] ->
          :ets.delete(state.task_refs_table, ref)
-         {:noreply, handle_task_failure(state, task_id, reason)}
+         {:noreply, handle_task_failure(state, task_id, reason )}
        [] ->
          Logger.error("Task failure for unknown reference: #{inspect(reason)}")
          {:noreply, decrement_task_count(state) |> process_next_pending_task()}
@@ -71,10 +86,10 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
    end
 
   # Private functional helpers
-  defp handle_task_completion(state, task, result) do
+  defp handle_task_completion(state, task) do
     state
     |> decrement_task_count()
-    |> save_result(task, result)
+    |> save_result(task)
     |> notify_completion(task)
     |> process_next_pending_task()
   end
@@ -95,8 +110,10 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
 
     # Now start the task
     task_async = Task.Supervisor.async_nolink(MiniHadoop.ComputeTask.TaskSupervisor, fn ->
-      result = execute_task_logic(task)
-      {ref, task, result}
+      case execute_task_logic(ComputeTask.mark_started(task)) do
+        {:ok, task} -> {:success, ref, task}
+        {:error,task} -> {:error, ref, task}
+      end
     end)
 
     # Monitor the task
@@ -113,129 +130,33 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
   end
 
   defp execute_task_logic(task) do
-    # Sleep between 2-6 seconds
-    Process.sleep(:rand.uniform(5000) + 50)
-    case fetch_task_data(task) do
-      {:ok, :map, map_input} ->
-        execute_map_task(map_input, task.module, %{})
-      {:ok, :reduce, reduce_input} ->
-        execute_reduce_task(reduce_input, task.module, %{})
+    case MiniHadoop.ComputeTask.TaskExecutor.execute_task(task) do
+      {:ok, completed_task} ->
+        {:ok, completed_task}
+
+      {:error, {:user_function_error, reason}} ->
+        failed_task = ComputeTask.mark_failed(task, "User function error: #{reason}")
+        {:error, failed_task}
+
+      {:error, {:user_function_crashed, error_msg}} ->
+        failed_task = ComputeTask.mark_failed(task, "Function crashed: #{error_msg}")
+        {:error, failed_task}
+
+      {:error, {:data_fetch_failed, reason}} ->
+        failed_task = ComputeTask.mark_failed(task, "Data fetch failed: #{reason}")
+        {:error, failed_task}
+
+      {:error, {:invalid_result_format, details}} ->
+        failed_task = ComputeTask.mark_failed(task, "Invalid result: #{details}")
+        {:error, failed_task}
+
+      {:error, {:unexpected_return_type, actual}} ->
+        failed_task = ComputeTask.mark_failed(task, "Unexpected return: #{inspect(actual)}")
+        {:error, failed_task}
+
       {:error, reason} ->
-        %{result: "failed", task_id: task.id, error: reason}
-    end
-  end
-
-  defp fetch_task_data(task) do
-    case task.type do
-      :map ->
-          # complete implementation
-          # case fetch_block_data (task.input_data) do
-          #
-          #
-          # end
-
-
-          # dummy data for testing
-          {:ok, :map, """
-            To be or not to be, that is the question: Whether 'tis nobler in the mind to suffer the slings and arrows of outrageous fortune, or to take arms against a sea of troubles and by opposing end them.
-            The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! The five boxing wizards jump quickly.
-            In a hole in the ground there lived a hobbit. Not a nasty, dirty, wet hole, filled with the ends of worms and an oozy smell, nor yet a dry, bare, sandy hole with nothing in it to sit down on or to eat: it was a hobbit-hole, and that means comfort.
-            To be or not to be, that is the question: Whether 'tis nobler in the mind to suffer the slings and arrows of outrageous fortune, or to take arms against a sea of troubles and by opposing end them.
-            The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! The five boxing wizards jump quickly.
-            In a hole in the ground there lived a hobbit. Not a nasty, dirty, wet hole, filled with the ends of worms and an oozy smell, nor yet a dry, bare, sandy hole with nothing in it to sit down on or to eat: it was a hobbit-hole, and that means comfort.
-            To be or not to be, that is the question: Whether 'tis nobler in the mind to suffer the slings and arrows of outrageous fortune, or to take arms against a sea of troubles and by opposing end them.
-            The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! The five boxing wizards jump quickly.
-            In a hole in the ground there lived a hobbit. Not a nasty, dirty, wet hole, filled with the ends of worms and an oozy smell, nor yet a dry, bare, sandy hole with nothing in it to sit down on or to eat: it was a hobbit-hole, and that means comfort.
-            To be or not to be, that is the question: Whether 'tis nobler in the mind to suffer the slings and arrows of outrageous fortune, or to take arms against a sea of troubles and by opposing end them.
-            The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! The five boxing wizards jump quickly.
-            In a hole in the ground there lived a hobbit. Not a nasty, dirty, wet hole, filled with the ends of worms and an oozy smell, nor yet a dry, bare, sandy hole with nothing in it to sit down on or to eat: it was a hobbit-hole, and that means comfort.
-            To be or not to be, that is the question: Whether 'tis nobler in the mind to suffer the slings and arrows of outrageous fortune, or to take arms against a sea of troubles and by opposing end them.
-            The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! The five boxing wizards jump quickly.
-            In a hole in the ground there lived a hobbit. Not a nasty, dirty, wet hole, filled with the ends of worms and an oozy smell, nor yet a dry, bare, sandy hole with nothing in it to sit down on or to eat: it was a hobbit-hole, and that means comfort.
-            """
-            }
-      :reduce ->
-        case fetch_all_value_of_keys(task.input_data) do
-          {:ok, values} -> {:ok, :reduce, values}
-          {:error, reason} -> {:error, reason}
-        end
-    end
-  end
-
-  # TODO: implement fetching block data for map.
-  @spec fetch_block_data({String.t(), [pid()]}) :: {:ok, any()} | {:error, any()}
-  def fetch_block_data({block_id, storage_pids}) do
-    # just do a simple network call  to fetch the data
-
-  end
-
-  @spec fetch_all_value_of_keys([{String.t(), [pid()]}]) :: {:ok, %{String.t() => [any()]}} | {:error, any()}
-  def fetch_all_value_of_keys(input) do
-    # Build storage -> keys mapping
-    storage_to_keys_map = Enum.reduce(input, %{}, fn {key, storage_pids}, acc ->
-      Enum.reduce(storage_pids, acc, fn storage_pid, inner_acc ->
-        Map.update(inner_acc, storage_pid, [key], &[key | &1])
-      end)
-    end)
-
-    # Fetch from all storages concurrently
-    storage_results =
-      storage_to_keys_map
-      |> Task.async_stream(fn {storage_pid, keys} ->
-          case GenServer.call(storage_pid, {:get_values_of_keys, keys}) do
-            {:ok, values_map} -> {:ok, storage_pid, values_map}
-            {:error, reason} -> {:error, storage_pid, reason}
-          end
-        end,
-        timeout: 30_000,
-        max_concurrency: 100
-      )
-      |> Enum.reduce_while(%{}, fn
-        {:ok, {:ok, storage_pid, values_map}}, acc ->
-          {:cont, Map.put(acc, storage_pid, values_map)}
-
-        {:ok, {:error, storage_pid, reason}}, _acc ->
-          {:halt, {:error, "Storage #{inspect(storage_pid)} failed: #{inspect(reason)}"}}
-
-        {:exit, reason}, _acc ->
-          {:halt, {:error, "Task failed: #{inspect(reason)}"}}
-      end)
-
-    case storage_results do
-      {:error, reason} ->
-        {:error, reason}
-
-      storage_results_map ->
-        # Reconstruct results efficiently
-        result_map = Enum.reduce(input, %{}, fn {key, storage_pids}, acc ->
-          values = Enum.flat_map(storage_pids, fn storage_pid ->
-            Map.get(storage_results_map, storage_pid, %{})
-            |> Map.get(key, [])
-          end)
-          Map.put(acc, key, values)
-        end)
-
-        {:ok, result_map}
-    end
-  end
-
-  @spec execute_map_task(any(), module(), any()) :: list()
-  def execute_map_task(input, map_module, additional_context) do
-    case MiniHadoop.Map.MapBehaviour.execute(map_module, input, additional_context) do
-      {:ok, result} ->
-        result
-      {:error, reason} ->
-        raise "Map task failed: #{inspect(reason)}"
-    end
-  end
-
-  @spec execute_reduce_task(any(), module(), any()) :: list()
-  def execute_reduce_task(input, reduce_module, additional_context) do
-    case MiniHadoop.Reduce.ReduceBehaviour.execute(reduce_module, input, additional_context) do
-      {:ok, result} ->
-        result
-      {:error, reason} ->
-        raise "Reduce task failed: #{inspect(reason)}"
+        failed_task = ComputeTask.mark_failed(task, "Execution failed: #{inspect(reason)}")
+        {:error, failed_task}
     end
   end
 
@@ -265,16 +186,16 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
     state
   end
 
-  defp save_result(state, task, result) do
+  defp save_result(state, task) do
     try do
       case task.type do
         :map ->
-          :ok = GenServer.call(state.storage_pid, {:store_map_results, result})
+          :ok = GenServer.call(state.storage_pid, {:store_map_results, task.output_data})
           Logger.info("Map task #{task.id} results saved to storage")
 
         :reduce ->
-          :ok = GenServer.call(state.storage_pid, {:store_reduce_results, result})
-          Logger.info("Reduce task #{task.id} saved #{length(result)} results to storage")
+          :ok = GenServer.call(state.storage_pid, {:store_reduce_results, task.output_data})
+          Logger.info("Reduce task #{task.id} saved #{length(task.output_data)} results to storage")
       end
     rescue
       error ->

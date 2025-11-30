@@ -51,7 +51,7 @@ defmodule MiniHadoop.Job.JobRunner do
           map_tasks: [],
           reduce_tasks: [],
           job_spawned_task_counter_ref: job_spawned_task_counter_ref,
-          result_path: result_path
+          result_path: job.output_dir || result_path
         }
 
         GenServer.cast(ComputeOperation, {:job_started, job.id})
@@ -186,9 +186,8 @@ defmodule MiniHadoop.Job.JobRunner do
   end
 
   defp write_results_to_file(reduce_results, result_path, job_id) do
-    file_path = result_path <> "/result_#{job_id}.txt"
+    file_path = Path.join(result_path, "result_#{job_id}.txt")
     directory = Path.dirname(file_path)
-
     File.mkdir_p!(directory)
 
     reduce_results
@@ -222,9 +221,8 @@ defmodule MiniHadoop.Job.JobRunner do
   end
 
   def handle_info({:DOWN, _ref, :process, dead_worker_pid, reason}, state) do
-    Logger.error("Worker died: #{inspect(dead_worker_pid)}, reason: #{reason}, restarting jobs")
-
-    {:, }
+    Logger.error("Worker died: #{inspect(dead_worker_pid)}, reason: #{reason}")
+    {:noreply, state}
   end
 
   def handle_info(msg, state) do
@@ -321,12 +319,11 @@ defmodule MiniHadoop.Job.JobRunner do
   end
 
 
-
   # Task generation
   defp generate_map_tasks(state) do
     map_tasks = state.current_chunk
     |> Enum.map(fn {_block_id, _workers_pids} = input_data  ->
-      ComputeTask.new_map(state.job.id, input_data, state.job.map_module)
+      ComputeTask.new_map(state.job.id, input_data, state.job.map_function, state.job.map_context)
     end)
 
     Logger.info("Generated #{length(map_tasks)} map tasks")
@@ -337,7 +334,7 @@ defmodule MiniHadoop.Job.JobRunner do
     reduce_tasks = state.current_chunk
     |> Enum.chunk_every(@max_key_each_reduce_task)
     |> Enum.map(fn keys ->
-      ComputeTask.new_reduce(state.job.id, keys, state.job.reduce_module)
+      ComputeTask.new_reduce(state.job.id, keys, state.job.reduce_function, state.job.reduce_context)
     end)
 
     Logger.info("Generated #{length(reduce_tasks)} reduce tasks")

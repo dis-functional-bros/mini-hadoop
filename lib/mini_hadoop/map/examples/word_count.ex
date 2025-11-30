@@ -11,6 +11,7 @@ defmodule MiniHadoop.Map.Examples.WordCount do
     data
     |> tokenizer.()
     |> Enum.frequencies()
+
   end
 
   # Mengubah jadi list kata

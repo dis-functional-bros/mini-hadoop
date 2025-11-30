@@ -105,39 +105,39 @@ defmodule MiniHadoop.Master.ComputeOperation do
     {:reply, state.workers, state}
   end
 
-  def handle_call({:submit_job, job_attrs}, _from, state) do
-    if :queue.len(state.pending_jobs) > @max_queue_size_of_jobs do
-      {:reply, {:error, :queue_full}, state}
+  def handle_call({:submit_job, job_spec}, _from, state) do
+    # Validate that we received a proper JobSpec struct
+    unless is_struct(job_spec, MiniHadoop.Models.JobSpec) do
+      {:reply, {:error, :invalid_job_spec}, state}
     end
 
-    case JobSpec.new(job_attrs) do
-      {:ok, job_spec} ->
-        # Create job execution in pending state
-        job_execution = JobExecution.new(job_spec.id)
+    if :queue.len(state.pending_jobs) > @max_queue_size_of_jobs do
+      {:reply, {:error, :queue_full}, state}
+    else
+      # JobSpec is already validated - use it directly
+      # Create job execution in pending state
+      job_execution = JobExecution.new(job_spec.id)
 
-        # Store job spec and execution
-        state = %{
-          state
-          | job_specs: Map.put(state.job_specs, job_spec.id, job_spec),
-            job_executions: Map.put(state.job_executions, job_spec.id, job_execution),
-            pending_jobs: :queue.in(job_spec.id, state.pending_jobs),
-            metrics: %{
-              state.metrics
-              | total_jobs_submitted: state.metrics.total_jobs_submitted + 1
-            }
-        }
+      # Store job spec and execution
+      state = %{
+        state
+        | job_specs: Map.put(state.job_specs, job_spec.id, job_spec),
+          job_executions: Map.put(state.job_executions, job_spec.id, job_execution),
+          pending_jobs: :queue.in(job_spec.id, state.pending_jobs),
+          metrics: %{
+            state.metrics
+            | total_jobs_submitted: state.metrics.total_jobs_submitted + 1
+          }
+      }
 
-        # Try to start jobs if we have capacity
-        state = start_pending_jobs(state)
+      # Try to start jobs if we have capacity
+      state = start_pending_jobs(state)
 
-        Logger.info(
-          "Job #{job_spec.id} submitted. #{:queue.len(state.pending_jobs)} jobs pending"
-        )
+      Logger.info(
+        "Job #{job_spec.id} submitted. #{:queue.len(state.pending_jobs)} jobs pending"
+      )
 
-        {:reply, {:ok, job_spec.id}, state}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+      {:reply, {:ok, job_spec.id}, state}
     end
   end
 

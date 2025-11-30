@@ -15,15 +15,20 @@ defmodule MiniHadoop do
     FileOperation.delete_file(filename)
   end
 
-  def test_submit_job do
-    job = %{
-      input: ["test_input"],
-      output: "test_output",
-      map_module:  MiniHadoop.Map.Examples.WordCount,
-      reduce_module: MiniHadoop.Reduce.Examples.SumReduce,
-    }
-
+  def submit_job(job) when is_map(job) do
     ComputeOperation.submit_job(job)
+  end
+
+  def test_submit_job do
+    # test create a job spec
+    {:ok, job_spec} = MiniHadoop.Models.JobSpec.create([
+      job_name: "word_count_analysis",
+      input_files: ["med.txt"],
+      map_function: &MiniHadoop.Examples.WordCount.word_count_mapper/2,
+      reduce_function: &MiniHadoop.Examples.WordCount.word_count_reducer/2
+    ])
+
+    ComputeOperation.submit_job(job_spec)
   end
 
   def file_op_info(task_id) when is_binary(task_id) do

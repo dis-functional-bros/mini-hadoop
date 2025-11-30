@@ -4,75 +4,83 @@ defmodule MiniHadoop.Models.ComputeTask do
   Represents a single computation unit (map or reduce task) for MapReduce.
   Named ComputeTask to avoid confusion with Elixir's Task module.
   """
-
-  @type task_type :: :map | :reduce
-  @type task_status :: :pending | :running | :completed | :failed
-  @type key :: any()
-  @type value :: any()
-  @type intermediate_data :: [{key(), [value()]}]
+  alias MiniHadoop.Models.Types
 
   defstruct [
     :id,
     :job_id,
     :type,
     :status,
-    :input_data,  # For map: {block_id=>[worker_pid]}, for reduce: [{key(), [pid()]}]
+    :input_data,  # For map: {block_id, [worker_pid]}, for reduce: [{key(), [pid()]}]
     :output_data,
-    :module,
-    :attempt,
+    :data,        # ← Added for TaskExecutor: holds fetched data
+    :function,
+    :context,
     :started_at,
-    :completed_at
+    :completed_at,
+    :error,
+    :raw_result,  # ← Added for TaskExecutor: holds user function raw output
+    :normalized_result # ← Added for TaskExecutor: holds validated result
   ]
 
   @type t :: %__MODULE__{
           id: String.t(),
           job_id: String.t(),
-          type: task_type(),
-          status: task_status(),
+          type: Types.task_type(),
+          status: Types.status(),
           input_data: any(),
-          output_data: intermediate_data() | any(),
-          module: module(),
-          attempt: integer(),
+          output_data: Types.result() | nil,
+          data: any() | nil,                    # ← Added type
+          function: Types.map_function() | Types.reduce_function(),
+          context: map(),
           started_at: DateTime.t() | nil,
-          completed_at: DateTime.t() | nil
+          completed_at: DateTime.t() | nil,
+          error: term() | nil,                  # ← Added type
+          raw_result: term() | nil,             # ← Added type
+          normalized_result: Types.result() | nil # ← Added type
         }
 
   @spec new(map()) :: t()
   def new(attrs) do
     defaults = %{
       status: :pending,
-      attempt: 0,
       started_at: nil,
-      completed_at: nil
+      completed_at: nil,
+      data: nil,
+      raw_result: nil,
+      normalized_result: nil,
+      error: nil
     }
 
     struct(__MODULE__, Map.merge(defaults, Map.new(attrs)))
   end
 
-  # Change spec from map to tuple
-  @spec new_map(String.t(), {String.t(), [pid()]}, module()) :: t()
-  def new_map(job_id, block_info, map_module) do
+  # Fixed spec - input_data should be tuple, not map
+  @spec new_map(String.t(), {String.t(), [pid()]}, Types.map_function(), map()) :: t()
+  def new_map(job_id, block_info, map_function, context) do
     task_id = "map_#{job_id}_#{generate_id()}"
 
     new(%{
       id: task_id,
       job_id: job_id,
       type: :map,
-      input_data: block_info,  # This will now be a tuple
-      module: map_module,
+      input_data: block_info,  # This is a tuple {block_id, [storage_pids]}
+      function: map_function,
+      context: context
     })
   end
 
-  @spec new_reduce(String.t(), [{key(), [pid()]}], module()) :: t()
-  def new_reduce(job_id, list_of_keys_and_locations, reduce_module) do
+  @spec new_reduce(String.t(), [{Types.key(), [pid()]}], Types.reduce_function(), map()) :: t()
+  def new_reduce(job_id, list_of_keys_and_locations, reduce_function, context) do
     task_id = "red_#{job_id}_#{generate_id()}"
 
     new(%{
       id: task_id,
       job_id: job_id,
       type: :reduce,
-      input_data: list_of_keys_and_locations,
-      module: reduce_module
+      input_data: list_of_keys_and_locations,  # This is a list of {key, [storage_pids]}
+      function: reduce_function,
+      context: context
     })
   end
 
@@ -88,11 +96,11 @@ defmodule MiniHadoop.Models.ComputeTask do
     }
   end
 
-  def mark_failed(task) do
+  def mark_failed(task, reason) do
     %{task |
       status: :failed,
       completed_at: DateTime.utc_now(),
-      attempt: task.attempt + 1
+      error: reason
     }
   end
 

@@ -4,11 +4,8 @@ defmodule MiniHadoop.Models.JobExecution do
   Represents the runtime execution state of a MapReduce job.
   """
 
-  @type task_status :: :pending | :running | :completed | :failed
-  @type progress :: %{
-    map: {completed :: non_neg_integer(), total :: non_neg_integer()},
-    reduce: {completed :: non_neg_integer(), total :: non_neg_integer()}
-  }
+  alias MiniHadoop.Models.ComputeTask
+  alias MiniHadoop.Models.Types
 
   defstruct [
     :job_id,           # Reference to JobSpec in job_specs map
@@ -28,15 +25,15 @@ defmodule MiniHadoop.Models.JobExecution do
   @type t :: %__MODULE__{
           job_id: String.t(),
           pid: pid() | nil,
-          status: task_status(),
-          map_tasks: [MiniHadoop.Models.ComputeTask.t()],
-          reduce_tasks: [MiniHadoop.Models.ComputeTask.t()],
+          status: Types.status(),
+          map_tasks: [ComputeTask.t()],
+          reduce_tasks: [ComputeTask.t()],
           created_at: DateTime.t(),
           started_at: DateTime.t() | nil,
           completed_at: DateTime.t() | nil,
           elapsed_time_ms: non_neg_integer() | nil,
-          progress: progress(),
-          results: any() | nil,
+          progress: Types.progress(),
+          results: Types.results() | nil,
           error: any() | nil
         }
 
@@ -86,18 +83,16 @@ defmodule MiniHadoop.Models.JobExecution do
     %{job_execution | progress: progress}
   end
 
-  @spec update_tasks(t(), :map | :reduce, [MiniHadoop.Models.ComputeTask.t()]) :: t()
-  def update_tasks(job_execution, :map, map_tasks) do
-    total = length(map_tasks)
-    progress = Map.put(job_execution.progress, :map, {0, total})
-    %{job_execution | map_tasks: map_tasks, progress: progress}
-  end
+  # @spec update_tasks(t(), :map | :reduce, non_neg_integer()) :: t()
+  # def update_tasks(job_execution, :map, total_num_of_map_task) do
+  #   progress = Map.put(job_execution.progress, :map, {0, total_num_of_map_task})
+  #   %{job_execution | map_tasks: map_tasks, progress: progress}
+  # end
 
-  def update_tasks(job_execution, :reduce, reduce_tasks) do
-    total = length(reduce_tasks)
-    progress = Map.put(job_execution.progress, :reduce, {0, total})
-    %{job_execution | reduce_tasks: reduce_tasks, progress: progress}
-  end
+  # def update_tasks(job_execution, :reduce, total_num_of_reduce_task) do
+  #   progress = Map.put(job_execution.progress, :reduce, {0, total})
+  #   %{job_execution | reduce_tasks: reduce_tasks, progress: progress}
+  # end
 
   @spec get_progress_percentage(t()) :: %{map: float(), reduce: float()}
   def get_progress_percentage(job_execution) do

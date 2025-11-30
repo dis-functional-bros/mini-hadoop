@@ -3,7 +3,7 @@ import Config
 # Common config for ALL environments
 config :mini_hadoop,
   heartbeat_interval_ms: 50_000,
-  block_size: 4 * 1024 * 1024,
+  block_size: 64 * 1024 * 1024,
   batch_size: 100,
   block_replication_factor: 2,
   max_concurrent_jobs: 1,
