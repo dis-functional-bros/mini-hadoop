@@ -30,6 +30,51 @@ Sebuah Distributed File System (DFS) yang terinspirasi dari Hadoop, dikembangkan
 - **TaskTracker**: Mengeksekusi *map tasks* dan *reduce tasks*.
 - **Pluggable Processing**: Pengguna dapat mendefinisikan fungsi map dan reduce sendiri.
 
+## 🧠 Wawasan Pengembangan & Tantangan Teknis
+
+### Kompleksitas Distribusi dan Manajemen State
+
+Sistem terdistribusi pada dasarnya adalah **90% side effects**. Salah satu pembelajaran penting adalah memisahkan **coordination logic** (yang penuh side effects) dari **pure execution**. Dalam MiniHadoop, fetching data menjadi bagian koordinasi, sementara task execution dirancang sebagai pure function yang mudah di-*reason* dan dikelola.
+
+### Performa dan Optimasi Memory
+
+Desain parallel process yang baik dapat memberikan dampak signifikan—dalam pengembangan ini, perbaikan kode berkualitas berhasil mengurangi penggunaan memori hingga **14x lipat**. Hal ini menunjukkan pentingnya:
+
+- **Pemilihan struktur data yang tepat** daripada pendekatan "yang penting selesai"
+- **Pemahaman mendalam terhadap BEAM VM** (scheduler, task, garbage collector)
+- **Benchmark pada workload nyata**—microbenchmark bisa misleading dalam environment concurrent
+
+### Tantangan Load Balancing
+
+Implementasi awal menggunakan **round robin approach** untuk distribusi blok ternyata memiliki kelemahan. Pendekatan ini tidak mempertimbangkan load saat ini dari setiap node, sehingga tidak dapat bereaksi terhadap perubahan kondisi cluster. Ketika terjadi replikasi atau penghapusan blok yang tidak merata, distribusi menjadi tidak seimbang.
+
+### Edge Cases dalam Sistem Terdistribusi
+
+Sistem terdistribusi memiliki banyak edge cases yang harus ditangani, terutama dalam arsitektur master-slave:
+
+- **Slave failure**: Node yang menyimpan sebagian data menjadi unreachable
+- **Network issues**: Menyebabkan delay atau inkonsistensi operasi  
+- **Master failure**: Saat ini belum ditangani dalam implementasi
+- **Data replication**: Diperlukan untuk mencegah data loss ketika node gagal
+
+### Keunggulan Elixir/OTP untuk Distributed Systems
+
+Elixir terbukti sangat powerful untuk menangani sistem terdistribusi karena:
+
+- **Inter-node communication** melalui message passing yang aman dan sederhana
+- **RPC calls** yang mudah untuk koordinasi antar server  
+- **Process isolation** yang murah namun powerful—spawning ratusan ribu lightweight process
+- **Built-in fault tolerance** dengan supervision tree yang mengelola lifecycle process
+- **Pattern matching** untuk handling failure recovery secara otomatis
+- **Tail recursion optimization** oleh BEAM VM untuk efisiensi memori
+
+### Prinsip Arsitektur Functional
+
+- **State immutability**: State disimpan dalam GenServer/proses yang bertanggung jawab atas satu entitas logis
+- **Message passing**: Menggantikan mutasi variabel global dengan komunikasi antar proses
+- **Atomic operations**: Pattern matching pada RPC calls memberikan atomicity
+- **Separation of concerns**: Memisahkan pure function dari side effects untuk maintainability
+
 ## 🎓 Aspek Functional Programming 
 
 ### 1. **State Immutability** - Foundation for Predictable Distributed Systems
