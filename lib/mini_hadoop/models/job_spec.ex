@@ -2,7 +2,7 @@
 defmodule MiniHadoop.Models.JobSpec do
   @moduledoc """
   Represents a complete MapReduce job specification (static plan).
-  Contains only the configuration needed to execute a job - no runtime state.
+  Contains config to execute a job.
   """
   require Logger
   alias MiniHadoop.Types

@@ -31,28 +31,6 @@ defmodule MiniHadoop do
     ComputeOperation.submit_job(job_spec)
   end
 
-  def test_page_rank do
-    # Test 1: Initialize PageRank (first iteration)
-    {:ok, init_job_spec} = MiniHadoop.Models.JobSpec.create([
-      job_name: "pagerank_first",
-      input_files: ["a.tsv"],
-      map_function: &MiniHadoop.Examples.PageRank.pagerank_mapper/2,
-      reduce_function: &MiniHadoop.Examples.PageRank.pagerank_reducer/2,
-      map_context: %{
-        damping_factor: 0.85,
-        total_pages: 41332
-      },
-      reduce_context: %{
-        damping_factor: 0.85,
-        total_pages: 41332
-      }
-    ])
-
-    ComputeOperation.submit_job(init_job_spec)
-
-    # After init_job completes, run PageRank iteration
-    # The output will be at: /path/to/pagerank_results/pagerank_initialize_job123.json
-  end
 
   def file_op_info(task_id) when is_binary(task_id) do
     FileOperation.get_operation_info(task_id)
@@ -83,7 +61,6 @@ defmodule MiniHadoop do
       master_state: master_state,
       uptime: uptime,
       started_at: app_start_time,
-      # datanodes: datanodes  master_state already have datanodes info
     }
   end
 end
