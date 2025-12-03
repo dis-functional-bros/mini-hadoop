@@ -5,7 +5,7 @@ defmodule MiniHadoop.Job.JobRunner do
   alias MiniHadoop.Models.ComputeTask
   alias MiniHadoop.Master.ComputeOperation
 
-  @max_key_each_reduce_task Application.compile_env(:mini_hadoop, :max_num_of_key_each_reduce_task)
+  @max_num_of_reducer_each_worker Application.compile_env(:mini_hadoop, :max_num_of_reducer_each_worker)
 
   defstruct [
     :job,
@@ -172,8 +172,11 @@ defmodule MiniHadoop.Job.JobRunner do
     {:stop, :normal, final_state}
   end
 
-  defp process_reduce_results(reduce_results) do
-    # Convert to sorted list of {key, value} tuples
+  defp process_reduce_results({reduce_results, sort_result_opt}) do
+    case sort_result_opt do
+    nil -> reduce_results
+    {by}
+    end
     reduce_results
     |> Enum.flat_map(fn
       {key, value} -> [{key, value}]
@@ -279,7 +282,7 @@ defmodule MiniHadoop.Job.JobRunner do
       timeout: 15_000
     )
     |> Enum.flat_map(fn
-      {:ok, results} -> results  # Now 'results' is just a list, not {:ok, list}
+      {:ok, results} -> {results, state.sort_result_opt}
       _ -> []
     end)
   end
@@ -362,8 +365,10 @@ defmodule MiniHadoop.Job.JobRunner do
         fn storage_pid ->
           try do
             # ADD TIMEOUT to GenServer.call (30 seconds should be plenty)
-            case GenServer.call(storage_pid, :get_sample_keys, 30_000) do
-              {:ok, keys} -> keys
+            case GenServer.call(storage_pid, :get_sample_keys, 60_000) do
+              {:ok, keys} ->
+                Logger.info("Received #{length(keys)} keys from #{inspect(storage_pid)}")
+                keys
               {:error, _} -> []
               _ -> []
             end
@@ -378,7 +383,7 @@ defmodule MiniHadoop.Job.JobRunner do
         end,
         max_concurrency: length(storage_pids),
         ordered: false,
-        timeout: 60_000  # Overall timeout for the whole async_stream
+        timeout: 80_000  # Overall timeout for the whole async_stream
       )
       |> Enum.flat_map(fn
         {:ok, keys} -> keys
@@ -390,7 +395,7 @@ defmodule MiniHadoop.Job.JobRunner do
       |> Enum.uniq()
 
     # Calculate total reduce tasks
-    total_reduce_tasks = if sample_keys == [], do: 1, else: length(sample_keys) + 1
+    total_reduce_tasks = if sample_keys == [], do: 1, else: min(length(storage_pids)*@max_num_of_reducer_each_worker, length(sample_keys))+1
 
     Logger.info("""
     Collected #{length(sample_keys)} unique sample keys
@@ -417,9 +422,8 @@ defmodule MiniHadoop.Job.JobRunner do
     # sample_keys does NOT include :first/:last
     sample_keys = state.shuffle_data
 
-    # Create ranges efficiently - NO :first/:last in the list
-    # We'll create them on the fly
-    individual_ranges = create_ranges_from_keys(sample_keys, storage_pids)
+    # Create ranges evenly distributed to total_reduce_tasks
+    individual_ranges = create_ranges_from_keys(sample_keys, storage_pids, state.total_reduce_tasks)
 
     # Verify: Should equal total_reduce_tasks calculated earlier
     actual_ranges = length(individual_ranges)
@@ -438,28 +442,47 @@ defmodule MiniHadoop.Job.JobRunner do
     individual_ranges |> Enum.chunk_every(chunk_size)
   end
 
-  defp create_ranges_from_keys(sample_keys, storage_pids) do
+  defp create_ranges_from_keys(sample_keys, storage_pids, total_ranges) do
     case sample_keys do
       [] ->
         [{:first, :last, storage_pids}]
 
-      [single] ->
-        [
-          {:first, single, storage_pids},
-          {single, :last, storage_pids}
-        ]
+      keys ->
+        # Calculate how many keys per range (approximately)
+        keys_per_range = max(div(length(keys), total_ranges), 1)
 
-      [first | rest] ->
-        # Build ranges in a single pass
-        {ranges, _} =
-          Enum.reduce(rest, {[{:first, first, storage_pids}], first}, fn key, {acc, prev_key} ->
-            {[{prev_key, key, storage_pids} | acc], key}
+        # If we have fewer keys than ranges, adjust total_ranges
+        actual_ranges = min(total_ranges, length(keys) + 1)
+
+        # Build ranges using key indices
+        ranges =
+          Enum.map(0..(actual_ranges - 1), fn range_index ->
+            start_index = range_index * keys_per_range
+            end_index = start_index + keys_per_range - 1
+
+            if range_index == 0 do
+              # First range: from :first to the key at end_index
+              end_key = Enum.at(keys, min(end_index, length(keys) - 1))
+              {:first, end_key, storage_pids}
+            else
+              # Middle ranges: from previous key to current end key
+              prev_end_index = start_index - 1
+              start_key = Enum.at(keys, prev_end_index)
+              end_key = Enum.at(keys, min(end_index, length(keys) - 1), :last)
+              {start_key, end_key, storage_pids}
+            end
           end)
 
-        # Add last range and reverse
-        last_key = List.last(rest)
-        ranges = [{last_key, :last, storage_pids} | ranges]
-        Enum.reverse(ranges)
+        # Ensure the last range goes to :last
+        ranges =
+          case List.last(ranges) do
+            {start_key, _, pid} ->
+              List.replace_at(ranges, -1, {start_key, :last, pid})
+            {:first, _, pid} ->
+              List.replace_at(ranges, -1, {:first, :last, pid})
+          end
+
+        ranges
     end
   end
 
