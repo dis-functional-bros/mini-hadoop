@@ -4,7 +4,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
 
   alias MiniHadoop.Models.ComputeTask
 
-  @max_concurrent_tasks_on_runner Application.compile_env(:mini_hadoop, :max_concurrent_compute_tasks, 4)
+  @max_concurrent_tasks_on_runner Application.compile_env(:mini_hadoop, :max_concurrent_tasks_on_runner, 4)
 
   def start_link(job_id, job_pid, storage_pid) do
     GenServer.start_link(__MODULE__, {job_id, job_pid, storage_pid})
@@ -190,11 +190,11 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
     try do
       case task.type do
         :map ->
-          :ok = GenServer.call(state.storage_pid, {:store_map_results, task.output_data})
+          :ok = GenServer.call(state.storage_pid, {:store_map_results, task.output_data}, :infinity)
           Logger.info("Map task #{task.id} results saved to storage")
 
         :reduce ->
-          :ok = GenServer.call(state.storage_pid, {:store_reduce_results, task.output_data})
+          :ok = GenServer.call(state.storage_pid, {:store_reduce_results, task.output_data}, :infinity)
           Logger.info("Reduce task #{task.id} saved #{length(task.output_data)} results to storage")
       end
     rescue

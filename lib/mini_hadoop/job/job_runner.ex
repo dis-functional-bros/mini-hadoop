@@ -66,24 +66,16 @@ defmodule MiniHadoop.Job.JobRunner do
   end
 
   # Higher-order phase execution
-  defp execute_phase(state, phase_type, data_fetcher, task_generator, task_dispatcher, completion_checker) do
+  defp execute_phase(state, phase_type, data_fetcher, input_formatter ,task_generator, task_dispatcher, completion_checker) do
     with_counter_cleanup(state, phase_type, fn state ->
       state
       |> notify_phase_start(phase_type)
       |> data_fetcher.()
       |> (fn state_with_data ->
-            {data_list, chunk_size} = case phase_type do
-              :map ->
-                {Map.get(state_with_data, :participating_blocks), Map.size(state_with_data.worker_process_map)* 5}
-
-              :reduce ->
-                reduce_chunk_size = @max_key_each_reduce_task * Map.size(state_with_data.worker_process_map) * 5
-                {Map.get(state_with_data, :shuffle_data), reduce_chunk_size}
-            end
+            data_list = input_formatter.(state_with_data)
 
             # Lazyly evaluated
             data_list
-            |> Stream.chunk_every(chunk_size)
             |> Stream.each(fn chunk ->
               Task.start(fn ->
                 state_with_data
@@ -174,45 +166,89 @@ defmodule MiniHadoop.Job.JobRunner do
     result = state
       |> fetch_all_reduce_results()
       |> process_reduce_results()
-      |> write_results_to_file(state.result_path, state.job.id)
+      |> write_results_to_file(state.result_path, state.job)
       |> create_job_summary(state)
     final_state = notify_job_completion(state, result)
     {:stop, :normal, final_state}
   end
 
   defp process_reduce_results(reduce_results) do
-    # reduce result
-    Enum.sort_by(reduce_results, fn {_key, value} -> value end, :desc)
+    # Convert to sorted list of {key, value} tuples
+    reduce_results
+    |> Enum.flat_map(fn
+      {key, value} -> [{key, value}]
+      map when is_map(map) -> Map.to_list(map)
+      _ -> []
+    end)
+    |> Enum.sort_by(fn {_key, value} -> -value end)
   end
 
-  defp write_results_to_file(reduce_results, result_path, job_id) do
-    file_path = Path.join(result_path, "result_#{job_id}.txt")
+  defp write_results_to_file(reduce_results, result_path, job) do
+    # Save JSON version
+    json_file = save_json_file(reduce_results, result_path, job)
+
+    # Save ordered TXT version
+    txt_file = save_txt_file(reduce_results, result_path, job)
+
+    {json_file, txt_file}
+  end
+
+  defp save_json_file(reduce_results, result_path, job) do
+    file_path = Path.join(result_path, "#{job.job_name}_#{job.id}.json")
     directory = Path.dirname(file_path)
     File.mkdir_p!(directory)
 
-    reduce_results
-    |> Enum.map(fn {key, value} -> %{key => value} end)  # Convert to maps
-    |> Jason.encode!(pretty: true)
-    |> then(&File.write(file_path, &1))
-    |> case do
+    # Create a map (won't be sorted in JSON)
+    result_map = Map.new(reduce_results)
+    json_data = Jason.encode!(result_map, pretty: true)
+
+    case File.write(file_path, json_data) do
       :ok ->
-        Logger.info("Job #{job_id}: Results written to #{file_path}")
+        Logger.info("Job #{job.id}: JSON results written to #{file_path}")
         file_path
 
       {:error, reason} ->
-        Logger.error("Job #{job_id}: Failed to write results to file: #{reason}")
+        Logger.error("Job #{job.id}: Failed to write JSON results: #{reason}")
         nil
     end
   end
 
-  defp create_job_summary(results_file_path, state) do
-    %{
-      total_map_tasks: state.total_map_tasks,
-      total_reduce_tasks: state.total_reduce_tasks,
-      job_results: results_file_path
-    }
+  defp save_txt_file(reduce_results, result_path, job) do
+    file_path = Path.join(result_path, "#{job.job_name}_#{job.id}_sorted.txt")
+    directory = Path.dirname(file_path)
+    File.mkdir_p!(directory)
+
+    # Create ordered TXT file
+    txt_content =
+      reduce_results
+      |> Enum.map(fn {key, value} -> "#{key}\t#{value}" end)
+      |> Enum.join("\n")
+
+    # Add header with count
+    header = "# Sorted results - Total: #{length(reduce_results)} entries\n"
+    content = header <> txt_content
+
+    case File.write(file_path, content) do
+      :ok ->
+        Logger.info("Job #{job.id}: TXT results written to #{file_path}")
+        file_path
+
+      {:error, reason} ->
+        Logger.error("Job #{job.id}: Failed to write TXT results: #{reason}")
+        nil
+    end
   end
 
+  defp create_job_summary({json_file, txt_file}, state) do
+    %{
+      job_id: state.job.id,
+      total_map_tasks: state.total_map_tasks,
+      total_reduce_tasks: state.total_reduce_tasks,
+      json_results: json_file,
+      txt_results: txt_file,
+      success: not is_nil(json_file) and not is_nil(txt_file)
+    }
+  end
 
   def handle_info({:job_failed, error}, state) do
     Logger.error("Job #{state.job.id} failed: #{inspect(error)}")
@@ -225,6 +261,30 @@ defmodule MiniHadoop.Job.JobRunner do
     {:noreply, state}
   end
 
+  defp fetch_all_reduce_results(state) do
+    storage_pids = Map.values(state.worker_process_map)
+                   |> Enum.map(fn {storage_pid, _runner_pid} -> storage_pid end)
+
+    storage_pids
+    |> Task.async_stream(
+      fn storage_pid ->
+        case GenServer.call(storage_pid, :get_reduce_results, 10_000) do
+          {:ok, results} when is_list(results) ->
+            Enum.map(results, fn {k, v} -> {k, v} end)
+          _ ->
+            []
+        end
+      end,
+      max_concurrency: length(storage_pids),
+      timeout: 15_000
+    )
+    |> Enum.flat_map(fn
+      {:ok, results} -> results  # Now 'results' is just a list, not {:ok, list}
+      _ -> []
+    end)
+  end
+
+
   def handle_info(msg, state) do
     Logger.info("JobRunner #{inspect(self())} received ANY message: #{inspect(msg)}")
     {:noreply, state}
@@ -236,6 +296,7 @@ defmodule MiniHadoop.Job.JobRunner do
       state,
       :map,
       &fetch_participating_blocks/1,
+      &block_list_formatter/1,
       &generate_map_tasks/1,
       &dispatch_tasks_with_state(&1, :map_tasks),
       &wait_for_phase_completion(&1, :map, :proceed_to_reduce)
@@ -246,14 +307,14 @@ defmodule MiniHadoop.Job.JobRunner do
     execute_phase(
       state,
       :reduce,
-      &fetch_shuffle_data/1,
-      &generate_reduce_tasks/1,
+      &fetch_sample_keys/1,
+      &key_range_formatter/1,
+      &generate_reduce_tasks_by_key_range/1,
       &dispatch_tasks_with_state(&1, :reduce_tasks),
       &wait_for_phase_completion(&1, :reduce, :proceed_to_completion)
     )
   end
 
-  # Task completion handlers
   defp handle_map_task_completed(state) do
     handle_task_completion(state, :map, :completed_map_tasks, :failed_map_tasks, :total_map_tasks, :proceed_to_reduce)
   end
@@ -274,50 +335,133 @@ defmodule MiniHadoop.Job.JobRunner do
     check_completion(state, :reduce, completed, failed, state.total_reduce_tasks, :proceed_to_completion)
   end
 
-  # TODO
-  # ======================================================
-  @spec fetch_participating_blocks(%{job: %{input_data: [String.t()]}}) :: %{
+  @spec fetch_participating_blocks(%{job: %{input_files: [String.t()]}}) :: %{
     participating_blocks: [{String.t(), [pid()]}],
     total_map_tasks: integer()
   }
   defp fetch_participating_blocks(state) do
-    # The main result of this function is a list of participating blocks and where are they stored.
-    # participating_blocks: [{"block_1", [worker_1]}, {"block_2", [worker_2]}]
-
-    # ----------------------------------------------------
-    # Dummy data for testing purposes
     Logger.info("Fetching participating blocks")
-    workers =state.worker_process_map |> Map.keys()
-    participating_blocks =
-      1..10 |> Enum.map(fn i ->
-        worker_count = Enum.random(1..2)
-        worker_list = Enum.take_random(workers, worker_count)
-        {"block_#{i}", worker_list}
+    blocks = MiniHadoop.Master.MasterNode.fetch_blocks_by_filenames(state.job.input_files)
+    total_map_tasks = Enum.count(blocks)
+    %{state | participating_blocks: blocks, total_map_tasks: total_map_tasks}
+  end
+
+  defp fetch_sample_keys(state) do
+    Logger.info("Fetching sample keys")
+
+    # Extract storage_pids
+    storage_pids =
+      Map.values(state.worker_process_map)
+      |> Enum.map(fn {storage_pid, _runner} -> storage_pid end)
+
+
+    # Fetch samples - optimized with PROPER TIMEOUTS
+    sample_keys =
+      storage_pids
+      |> Task.async_stream(
+        fn storage_pid ->
+          try do
+            # ADD TIMEOUT to GenServer.call (30 seconds should be plenty)
+            case GenServer.call(storage_pid, :get_sample_keys, 30_000) do
+              {:ok, keys} -> keys
+              {:error, _} -> []
+              _ -> []
+            end
+          catch
+            :exit, {:timeout, _} ->
+              Logger.warning("Timeout fetching samples from #{inspect(storage_pid)}")
+              []
+            :exit, reason ->
+              Logger.warning("Storage #{inspect(storage_pid)} died: #{inspect(reason)}")
+              []
+          end
+        end,
+        max_concurrency: length(storage_pids),
+        ordered: false,
+        timeout: 60_000  # Overall timeout for the whole async_stream
+      )
+      |> Enum.flat_map(fn
+        {:ok, keys} -> keys
+        {:exit, reason} ->
+          Logger.warning("Sample fetch task failed: #{inspect(reason)}")
+          []
       end)
-    total_map_tasks = Enum.count(participating_blocks)
-    Logger.info("Will generate #{total_map_tasks} map tasks")
-    # ----------------------------------------------------
+      |> Enum.sort()
+      |> Enum.uniq()
 
-    %{state | participating_blocks: participating_blocks, total_map_tasks: total_map_tasks}
+    # Calculate total reduce tasks
+    total_reduce_tasks = if sample_keys == [], do: 1, else: length(sample_keys) + 1
+
+    Logger.info("""
+    Collected #{length(sample_keys)} unique sample keys
+    Will create #{total_reduce_tasks} reduce tasks
+    """)
+
+    %{state |
+      shuffle_data: sample_keys,
+      total_reduce_tasks: total_reduce_tasks
+    }
   end
 
-  @spec fetch_shuffle_data(%{}) :: map()
-  defp fetch_shuffle_data(state) do
-    unique_keys_by_storage = fetch_all_unique_keys(state)
-    shuffle_data = unique_keys_by_storage
-    |> Enum.flat_map(fn {storage_pid, keys} ->
-      MapSet.to_list(keys)
-      |> Enum.map(fn key -> {key, storage_pid} end)
-    end)
-    |> Enum.group_by(fn {key, _} -> key end, fn {_, storage_pid} -> storage_pid end)
-    |> Enum.map(fn {key, storage_pids} -> {key, storage_pids} end)
-
-    total_reduce_tasks = ceil(Enum.count(shuffle_data) / @max_key_each_reduce_task)
-
-    Logger.info("Will generate #{total_reduce_tasks} reduce tasks")
-    %{state | shuffle_data: shuffle_data, total_reduce_tasks: total_reduce_tasks}
+  defp block_list_formatter(state) do
+    chunk_size = Map.size(state.worker_process_map)* 5
+    state.participating_blocks |> Enum.chunk_every(chunk_size)
   end
 
+  defp key_range_formatter(state) do
+    storage_pids =
+      Map.values(state.worker_process_map)
+      |> Enum.map(fn {storage_pid, _runner} -> storage_pid end)
+      |> Enum.uniq()
+
+    # sample_keys does NOT include :first/:last
+    sample_keys = state.shuffle_data
+
+    # Create ranges efficiently - NO :first/:last in the list
+    # We'll create them on the fly
+    individual_ranges = create_ranges_from_keys(sample_keys, storage_pids)
+
+    # Verify: Should equal total_reduce_tasks calculated earlier
+    actual_ranges = length(individual_ranges)
+    expected_ranges = state.total_reduce_tasks
+
+    if actual_ranges != expected_ranges do
+      Logger.warning("Range count mismatch: #{actual_ranges} vs #{expected_ranges}")
+    end
+
+    # Chunk ranges for parallel processing
+    chunk_size = Map.size(state.worker_process_map) * 5
+
+    Logger.debug("Created #{actual_ranges} ranges, chunking by #{chunk_size}")
+
+    # Return chunked ranges
+    individual_ranges |> Enum.chunk_every(chunk_size)
+  end
+
+  defp create_ranges_from_keys(sample_keys, storage_pids) do
+    case sample_keys do
+      [] ->
+        [{:first, :last, storage_pids}]
+
+      [single] ->
+        [
+          {:first, single, storage_pids},
+          {single, :last, storage_pids}
+        ]
+
+      [first | rest] ->
+        # Build ranges in a single pass
+        {ranges, _} =
+          Enum.reduce(rest, {[{:first, first, storage_pids}], first}, fn key, {acc, prev_key} ->
+            {[{prev_key, key, storage_pids} | acc], key}
+          end)
+
+        # Add last range and reverse
+        last_key = List.last(rest)
+        ranges = [{last_key, :last, storage_pids} | ranges]
+        Enum.reverse(ranges)
+    end
+  end
 
   # Task generation
   defp generate_map_tasks(state) do
@@ -330,14 +474,20 @@ defmodule MiniHadoop.Job.JobRunner do
     %{state | map_tasks: map_tasks}
   end
 
-  defp generate_reduce_tasks(state) do
-    reduce_tasks = state.current_chunk
-    |> Enum.chunk_every(@max_key_each_reduce_task)
-    |> Enum.map(fn keys ->
-      ComputeTask.new_reduce(state.job.id, keys, state.job.reduce_function, state.job.reduce_context)
-    end)
+  defp generate_reduce_tasks_by_key_range(state) do
+    reduce_tasks =
+      state.current_chunk
+      |> Enum.map(fn {start_key, end_key, storage_pids} ->
+        # Create ONE reduce task for EACH range in the chunk
+        ComputeTask.new_reduce(
+          state.job.id,
+          {start_key, end_key, storage_pids},
+          state.job.reduce_function,
+          state.job.reduce_context
+        )
+      end)
 
-    Logger.info("Generated #{length(reduce_tasks)} reduce tasks")
+    Logger.info("Generated #{length(reduce_tasks)} reduce tasks from chunk")
     %{state | reduce_tasks: reduce_tasks}
   end
 
@@ -497,21 +647,39 @@ defmodule MiniHadoop.Job.JobRunner do
     storage_pids = Map.values(state.worker_process_map)
                    |> Enum.map(fn {storage_pid, _runner_pid} -> storage_pid end)
 
-    storage_pids
-    |> Task.async_stream(
-      fn storage_pid ->
-        case GenServer.call(storage_pid, :get_unique_keys, 10_000) do
-          {:ok, keys} -> {:ok, {storage_pid, keys}}
-          {:error, reason} -> {:error, {storage_pid, reason}}
-        end
-      end,
-      max_concurrency: length(storage_pids),
-      timeout: 15_000
-    )
-    |> Enum.reduce(%{}, fn
-      {:ok, {:ok, {storage_pid, keys}}}, acc -> Map.put(acc, storage_pid, keys)
-      _, acc -> acc
-    end)
+    results =
+      storage_pids
+      |> Task.async_stream(
+        fn storage_pid ->
+          case GenServer.call(storage_pid, :get_unique_keys, 10_000) do
+            {:ok, keys} -> {storage_pid, {:ok, keys}}
+            {:error, reason} -> {storage_pid, {:error, reason}}
+          end
+        end,
+        max_concurrency: length(storage_pids),
+        timeout: 15_000
+      )
+      |> Enum.map(fn
+        {:ok, result} -> result
+        {:exit, reason} -> {:error, {:task_exit, reason}}
+      end)
+
+    # Separate successful results from errors
+    {successful, errors} =
+      Enum.split_with(results, fn
+        {_pid, {:ok, _keys}} -> true
+        _ -> false
+      end)
+
+    # Log any errors
+    if errors != [] do
+      Logger.warning("Failed to fetch keys from some storage nodes: #{inspect(errors)}")
+    end
+
+    # Build map of storage_pid -> keys MapSet
+    successful
+    |> Enum.map(fn {storage_pid, {:ok, keys}} -> {storage_pid, keys} end)
+    |> Map.new()
   end
 
   defp fetch_all_reduce_results(state) do

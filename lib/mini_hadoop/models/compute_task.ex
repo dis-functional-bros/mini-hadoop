@@ -70,15 +70,15 @@ defmodule MiniHadoop.Models.ComputeTask do
     })
   end
 
-  @spec new_reduce(String.t(), [{Types.key(), [pid()]}], Types.reduce_function(), map()) :: t()
-  def new_reduce(job_id, list_of_keys_and_locations, reduce_function, context) do
+  @spec new_reduce(String.t(), [{String.t(), String.t(),[pid()]}], Types.reduce_function(), map()) :: t()
+  def new_reduce(job_id, keys_range_and_storage_pids, reduce_function, context) do
     task_id = "red_#{job_id}_#{generate_id()}"
 
     new(%{
       id: task_id,
       job_id: job_id,
       type: :reduce,
-      input_data: list_of_keys_and_locations,  # This is a list of {key, [storage_pids]}
+      input_data: keys_range_and_storage_pids,  # This is a list of {key, [storage_pids]}
       function: reduce_function,
       context: context
     })

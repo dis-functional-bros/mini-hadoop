@@ -91,16 +91,18 @@ defmodule MiniHadoop.Master.MasterNode do
   end
 
   @impl true
-  def handle_call({:fetch_blocks_by_filenames, filenames}, _from, state) do
+  def handle_call({:fetch_blocks_by_filenames, filenames}, _from, %{
+        filename_to_blocks: filename_to_blocks,
+        block_to_worker_mapping: block_to_worker_mapping
+      } = state) do
+
     result =
-      Enum.reduce(filenames, %{}, fn filename, acc ->
-        case Map.get(state.filename_to_blocks, filename) do
-          nil -> acc
-          block_ids ->
-            Enum.reduce(block_ids, acc, fn block_id, inner_acc ->
-              Map.put(inner_acc, block_id, Map.get(state.block_to_worker_mapping, block_id, []))
-            end)
-        end
+      filenames
+      |> Enum.flat_map(&Map.get(filename_to_blocks, &1, []))
+      |> Enum.uniq()
+      |> Enum.map(fn block_id ->
+        workers = Map.get(block_to_worker_mapping, block_id, [])
+        {block_id, workers}
       end)
 
     {:reply, result, state}

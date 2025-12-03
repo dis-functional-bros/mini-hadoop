@@ -207,18 +207,73 @@ Mekanisme Lazy Evaluation dalam Kode:
 - `File.stream!` membuat lazy stream yang hanya membaca file ketika di-iterate
 - `Stream.with_index` dan `Stream.chunk_every` mempertahankan lazy behavior
 - `Enum.reduce_while` meng-consume stream secara bertahap, memproses satu chunk setiap kali
-- Setiap chunk diproses secara independen dengan `Task.async_stream` untuk distribusi parallel
+- Setiap block dalam chunk diproses secara independen dengan `Task.async_stream` untuk distribusi parallel
 
 
 
-### 5. **Monadic Execution Pipeline** — Elegant way to execute tasks with unknown runtime behaviour
+### 5. **Monadic Execution Pipeline** — Elegant Way to Execute Tasks Pipeline with Error Handling and Unknown Runtime Behavior
 
-Our distributed systems support costum mapper and reducer functions. We can validate something at compile time with type spec. We can give out a very detailed explanation about what structure that 
+Monadic execution pipeline memungkinkan kita mengeksekusi sequence operations dengan error handling yang elegant, di mana setiap step tidak perlu mengetahui status step sebelumnya. Pipeline akan otomatis short-circuit ketika terjadi error, dan error handling dilakukan secara terpusat di akhir tanpa mengganggu flow logic utama. Pendekatan ini sangat cocok untuk MiniHadoop yang memungkinkan user meng-inject custom functions dengan runtime behavior yang tidak predictable.
 
-### 6. **Pure Functions & Elixir Process Model** — 
+```elixir
+# Monad operations
+def pure(task), do: {:ok, task}
+def error(reason), do: {:error, reason}
 
-### 7. **Fault Tolerance & Erlang OTP**
+# Bind operation for chaining monadic operations
+def bind({:ok, task}, func), do: func.(task)
+def bind({:error, reason}, _func), do: {:error, reason}
 
+@doc """
+Task execution pipeline.
+"""
+@spec execute_task(ComputeTask.t()) :: execution_result()
+def execute_task(task) do
+  pure(task)
+  |> bind(&fetch_task_data/1)           
+  |> bind(&execute_user_function/1)     
+  |> bind(&normalize_user_result/1)     
+  |> bind(&mark_task_completed/1)       
+end
+```
+
+dibandingkan dengan pendekatan imperative yang membutuhkan explicit error checking di setiap step:
+
+```java
+// Traditional imperative - error handling scattered everywhere
+public ExecutionResult executeTask(Task task) {
+    // Step 1: Must check error manually
+    TaskData data = fetchTaskData(task);
+    if (data == null) {
+        return ExecutionResult.error("Data fetch failed");
+    }
+    
+    // Step 2: Must check error again  
+    UserResult userResult = executeUserFunction(data);
+    if (userResult.hasError()) {
+        return ExecutionResult.error("User function failed: " + userResult.getError());
+    }
+    
+    // Step 3: More manual error checking
+    NormalizedResult normalized = normalizeUserResult(userResult);
+    if (!normalized.isValid()) {
+        return ExecutionResult.error("Normalization failed");
+    }
+    
+    // Step 4: Final manual check
+    if (!markTaskCompleted(normalized)) {
+        return ExecutionResult.error("Completion marking failed");
+    }
+    
+    return ExecutionResult.success(normalized);
+}
+```
+
+Monadic pipeline menghilangkan boilerplate error handling yang repetitive, membuat code lebih clean dan focused pada business logic, sementara tetap maintaining comprehensive error propagation untuk custom user functions yang mungkin memiliki unpredictable runtime behavior.
+
+### 6. **No Shared Memory** — Elixir process model that ensures 
+
+### 7. **Fault Tolerance & OTP** —  Combination of Immutability, Pure Function, Pattern Matching, Process Isolation, dan OTP Supervision Tree. Robust Fault Tolerance dan Error Handling
 
 
 ## 🚀 Panduan Penggunaan
