@@ -15,6 +15,6 @@ defmodule MiniHadoop.Models.Types do
     map: {completed :: non_neg_integer(), total :: non_neg_integer()},
     reduce: {completed :: non_neg_integer(), total :: non_neg_integer()}
   }
-
+  @type sort_result_opt :: {by :: :key | :value, direction :: :asc | :desc}
 
 end

@@ -2,7 +2,7 @@
 defmodule MiniHadoop.Models.JobSpec do
   @moduledoc """
   Represents a complete MapReduce job specification (static plan).
-  Contains only the configuration needed to execute a job - no runtime state.
+  Contains config to execute a job.
   """
   require Logger
   alias MiniHadoop.Types
@@ -16,6 +16,7 @@ defmodule MiniHadoop.Models.JobSpec do
     :map_context,
     :reduce_function,
     :reduce_context
+    :sort_result_opt
   ]
 
   @type t :: %__MODULE__{
@@ -26,7 +27,8 @@ defmodule MiniHadoop.Models.JobSpec do
           map_function: Types.map_function(),
           map_context: map(),
           reduce_function: Types.reduce_function(),
-          reduce_context: map()
+          reduce_context: map(),
+          sort_result_opt: Types.sort_result_opt()
         }
 
   @spec create(Keyword.t()) :: {:ok, t()} | {:error, String.t()}
@@ -74,7 +76,8 @@ defmodule MiniHadoop.Models.JobSpec do
       :map_function,
       :reduce_function,
       :map_context,
-      :reduce_context
+      :reduce_context,
+      :sort_result_opt
     ]
 
     invalid_keys = Enum.reject(attrs, fn {key, _} -> key in allowed_keys end)

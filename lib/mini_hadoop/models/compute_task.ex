@@ -13,14 +13,14 @@ defmodule MiniHadoop.Models.ComputeTask do
     :status,
     :input_data,  # For map: {block_id, [worker_pid]}, for reduce: [{key(), [pid()]}]
     :output_data,
-    :data,        # ← Added for TaskExecutor: holds fetched data
+    :data,        # holds fetched data
     :function,
     :context,
     :started_at,
     :completed_at,
     :error,
-    :raw_result,  # ← Added for TaskExecutor: holds user function raw output
-    :normalized_result # ← Added for TaskExecutor: holds validated result
+    :raw_result,  #  holds user function raw output
+    :normalized_result #  holds validated result
   ]
 
   @type t :: %__MODULE__{
@@ -30,14 +30,14 @@ defmodule MiniHadoop.Models.ComputeTask do
           status: Types.status(),
           input_data: any(),
           output_data: Types.result() | nil,
-          data: any() | nil,                    # ← Added type
+          data: any() | nil,
           function: Types.map_function() | Types.reduce_function(),
           context: map(),
           started_at: DateTime.t() | nil,
           completed_at: DateTime.t() | nil,
-          error: term() | nil,                  # ← Added type
-          raw_result: term() | nil,             # ← Added type
-          normalized_result: Types.result() | nil # ← Added type
+          error: term() | nil,
+          raw_result: term() | nil,
+          normalized_result: Types.result() | nil
         }
 
   @spec new(map()) :: t()
