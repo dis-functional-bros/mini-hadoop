@@ -15,7 +15,7 @@ defmodule MiniHadoop.Models.JobSpec do
     :map_function,
     :map_context,
     :reduce_function,
-    :reduce_context
+    :reduce_context,
     :sort_result_opt
   ]
 
@@ -139,6 +139,11 @@ defmodule MiniHadoop.Models.JobSpec do
         {:cont, :ok}
       {:reduce_context, value}, _acc ->
         {:halt, {:error, "reduce_context must be a map, got: #{inspect(value)}"}}
+
+      {:sort_result_opt,value}, _acc when is_tuple(value) ->
+        {:cont, :ok}
+      {:sort_result_opt,value}, _acc ->
+        {:halt, {:error, "sort_result_opt must be a tuple, got: #{inspect(value)}"}}
 
       {key, _value}, _acc ->
         {:halt, {:error, "Unexpected key during type validation: #{key}"}}

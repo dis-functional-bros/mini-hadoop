@@ -154,34 +154,14 @@ defmodule MiniHadoop.Examples.PageRank do
   end
 
   defp load_ranks(file) do
-    try do
-      case File.read(file) do
-        {:ok, content} ->
-          case Jason.decode(content) do
-            {:ok, rank_map} when is_map(rank_map) ->
-              # The file is already in the format we need: %{"page" => rank}
-              # Just need to ensure all values are numbers
-              Enum.reduce(rank_map, %{}, fn
-                {page, rank} when is_number(rank) ->
-                  Map.put(%{}, page, rank)
-                {page, rank} when is_binary(rank) ->
-                  # Try to convert string to number
-                  case Float.parse(rank) do
-                    {parsed_rank, _} -> Map.put(%{}, page, parsed_rank)
-                    :error -> %{}
-                  end
-                {page, _rank} -> %{}
-              end)
-
-            _ -> %{}
-          end
-
-        _ -> %{}
-      end
-    rescue
-      error ->
-        Logger.error("Error loading ranks from #{file}: #{inspect(error)}")
-        %{}
+    case File.read(file) do
+      {:ok, content} ->
+        case Jason.decode(content) do
+          {:ok, rank_map} when is_map(rank_map) -> rank_map
+          _ -> %{}
+        end
+      _ -> %{}
     end
   end
+
 end

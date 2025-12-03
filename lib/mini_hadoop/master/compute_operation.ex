@@ -191,6 +191,8 @@ defmodule MiniHadoop.Master.ComputeOperation do
         JobExecution.update_progress(job_execution, phase, completed, total)
       end)
 
+      Logger.info("Job #{job_id} #{phase} #{completed}/#{total}")
+
     {:noreply, state}
   end
 

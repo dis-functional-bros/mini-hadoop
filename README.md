@@ -37,17 +37,25 @@ Sebuah Distributed File System (DFS) yang terinspirasi dari Hadoop, dikembangkan
 Immutability memastikan state program selalu predictable dan tidak berubah tanpa sepengetahuan developer. Setiap transformasi data bersifat eksplisit sehingga mudah dilacak dan dipahami alurnya. Hal ini menghilangkan bugs yang disebabkan oleh hidden state mutations dalam codebase yang besar.
 
 ```elixir
-def handle_info(:proceed_to_completion, state) do
-  result = state
-    |> fetch_all_reduce_results()
-    |> process_reduce_results()
-    |> write_results_to_file(state.result_path, state.job.id)
-    |> create_job_summary(state)
-  final_state = notify_job_completion(state, result)
-  {:stop, :normal, final_state}
+defp process_next_pending_task(state) do
+  if concurrent_tasks_under_limit?(state) do
+    case dequeue_task(state) do
+      {task, new_state} when not is_nil(task) ->
+        new_state
+        |> execute_task_immediately(task)
+        |> process_next_pending_task()  
+      {nil, new_state} ->
+        new_state
+    end
+  else
+    state
+  end
 end
 ```
-Fungsi `write_results_to_file`, `create_job_summary`, dan `notify_job_completion` menggunakan state yang sama persis tanpa takut nilai berubah, karena immutability menjamin konsistensi data sepanjang execution pipeline.
+Setiap fungsi menerima snapshot state yang immutable:
+  - dequeue_task(state) → Mengembalikan {task, new_state} di mana new_state adalah VERSI BARU tanpa task yang didequeue
+  - execute_task_immediately(new_state, task) → Bekerja dengan new_state tanpa mengubah state asli
+  - process_next_pending_task/1 → Rekursi menggunakan state TERBARU dari langkah sebelumnya
 
 Dibandingkan dengan bahasa imperative, tanggung jawab sepenuhnya dibebankan kepada developer untuk memahami codebase dengan jelas semua operasi yang mungkin memutasi state:
 
@@ -131,29 +139,36 @@ public void handleMessage(Object message, SystemState state) {
 Higher-order functions memungkinkan functional polymorphism—runtime behavior variation melalui function composition, bukan class inheritance. Dalam distributed systems, pendekatan ini memungkinkan kita membangun workflow orchestration yang highly composable dengan meng-inject phase-specific behaviors sebagai parameters.
 
 ```elixir
-defp execute_phase(state, phase_type, data_fetcher, task_generator, task_dispatcher, completion_checker) do
+defp execute_phase(state, phase_type, data_fetcher, input_formatter ,task_generator, task_dispatcher, completion_checker) do
   with_counter_cleanup(state, phase_type, fn state ->
     state
     |> notify_phase_start(phase_type)
-    |> data_fetcher.()                          # Injected data fetching logic
+    |> data_fetcher.()
     |> (fn state_with_data ->
-          # ... additional data processing logic
+        input_formatter.(state_with_data)
+          |> Stream.each(fn chunk ->
             Task.start(fn ->
               state_with_data
               |> Map.put(:current_chunk, chunk)
-              |> then(&task_generator.(&1))     # Injected task generation
-              |> then(&task_dispatcher.(&1))    # Injected task dispatch
+              |> then(&task_generator.(&1))
+              |> then(&task_dispatcher.(&1))
             end)
           end)
-          # ... additional steps
-    |> completion_checker.()                    # Injected completion handling
+          |> Stream.run()
+          state_with_data
+        end).()
+    |> completion_checker.()
   end)
 end
 
 # Use it like this
 defp execute_map_phase(state) do
   execute_phase(
-    state, :map, &fetch_participating_blocks/1, &generate_map_tasks/1,
+    state,
+    :map,
+    &fetch_participating_blocks/1,
+    &block_list_formatter/1,
+    &generate_map_tasks/1,
     &dispatch_tasks_with_state(&1, :map_tasks),
     &wait_for_phase_completion(&1, :map, :proceed_to_reduce)
   )
@@ -213,7 +228,7 @@ Mekanisme Lazy Evaluation dalam Kode:
 
 ### 5. **Monadic Execution Pipeline** — Elegant Way to Execute Tasks Pipeline with Error Handling and Unknown Runtime Behavior
 
-Monadic execution pipeline memungkinkan kita mengeksekusi sequence operations dengan error handling yang elegant, di mana setiap step tidak perlu mengetahui status step sebelumnya. Pipeline akan otomatis short-circuit ketika terjadi error, dan error handling dilakukan secara terpusat di akhir tanpa mengganggu flow logic utama. Pendekatan ini sangat cocok untuk MiniHadoop yang memungkinkan user meng-inject custom functions dengan runtime behavior yang tidak predictable.
+Monadic execution pipeline memungkinkan kita mengeksekusi sequence operations dengan error handling yang elegant, di mana setiap step tidak perlu mengetahui status step sebelumnya. Pipeline akan otomatis short-circuit ketika terjadi error, dan error handling dilakukan secara terpusat di akhir tanpa mengganggu flow logic utama. Pendekatan ini penting untuk program seperti MiniHadoop yang memungkinkan user meng-inject custom functions dengan runtime behavior yang unpredictable.
 
 ```elixir
 # Monad operations
@@ -271,9 +286,97 @@ public ExecutionResult executeTask(Task task) {
 
 Monadic pipeline menghilangkan boilerplate error handling yang repetitive, membuat code lebih clean dan focused pada business logic, sementara tetap maintaining comprehensive error propagation untuk custom user functions yang mungkin memiliki unpredictable runtime behavior.
 
-### 6. **No Shared Memory** — Elixir process model that ensures 
+### 6. **Pure-ish Functions** — Concurrent Execution Through Process Isolation Without Shared Memory
+Pure-ish functions adalah fungsi-fungsi yang memiliki side effects yang terkontrol namun tetap mempertahankan sifat deterministic melalui isolasi memory yang ketat. Konsep ini berbeda dengan pure functions murni yang sama sekali tidak memiliki side effects, tetapi tetap mempertahankan prinsip penting: tidak ada shared mutable state antara concurrent executions.
 
-### 7. **Fault Tolerance & OTP** —  Combination of Immutability, Pure Function, Pattern Matching, Process Isolation, dan OTP Supervision Tree. Robust Fault Tolerance dan Error Handling
+Dalam paradigma functional programming seperti Elixir, setiap fungsi beroperasi pada data immutable dan setiap concurrent process memiliki memory space sendiri yang terisolasi. Ini menghilangkan kompleksitas synchronization yang biasanya menjadi tanggung jawab developer dalam paradigma imperative.
+
+```elixir
+  defp fetch_keys_concurrently(keys, map_files, storage_dir) do
+    keys_set = MapSet.new(keys)
+
+    map_files
+    |> Task.async_stream(
+      fn file ->
+        # Isolasi sempurna: setiap task memiliki copy sendiri dari inputs
+        process_single_map_file(file, keys_set, storage_dir)
+      end,
+      max_concurrency: @max_concurrent_file_reads,
+      timeout: 30_000
+    )
+    |> Enum.reduce(%{}, fn
+      {:ok, file_results}, acc ->
+        merge_results_maps(acc, file_results)
+      {:exit, _reason}, acc ->
+        acc
+    end)
+  end
+```
+Fungsi process_single_map_filesebagai sebuah pure-ish function membaca map file yang terisolasi, setiap file merupakan unit pemrosesan independen yang tidak bergantung pada shared state. Meskipun melakukan I/O (side effect), fungsi ini tetap deterministic karena outputnya hanya bergantung pada konten file spesifik yang diproses, memungkinkan eksekusi concurrent tanpa synchronization.
+
+Dalam sistem terdistribusi seperti MiniHadoop, Elixir Process Model menghilangkan kompleksitas shared memory dengan memberikan setiap task memory space terisolasi. Hal ini memungkinkan developer fokus pada business logic, sementara platform menjamin memory isolation dan safe concurrent execution.
+
+### 7. **Fault Tolerance & OTP** — Robust Error Recovery Through Immutability, Process Isolation, and Supervision Trees
+
+Fault tolerance dalam Elixir dibangun di atas fondasi konsep functional programming yang dikombinasikan dengan OTP (Open Telecom Platform) framework. Kombinasi *immutability*, *pure functions*, *pattern matching*, *process isolation*, dan *supervision trees* menciptakan sistem yang resilient terhadap failures tanpa complex error handling boilerplate. Setiap komponen dapat fail dengan graceful recovery, sementara state tetap konsisten berkat sifat immutable data structures.
+
+```elixir
+# Spawn task with supervision
+task_async = Task.Supervisor.async_nolink(MiniHadoop.ComputeTask.TaskSupervisor, fn ->
+  case execute_task_logic(ComputeTask.mark_started(task)) do
+    {:ok, task} -> {:success, ref, task}
+    {:error,task} -> {:error, ref, task}
+  end
+end)
+
+# Pattern matched the message 
+def handle_info({task_ref, {:success, ref, task}}, state) when is_reference(task_ref) do
+  # Task success
+end
+
+def handle_info({:DOWN, ref, :process, _pid, :normal}, state) do
+  # Task failed
+end
+```
+
+Prinsip Fault Tolerance dalam Functional Programming:
+  - Immutability sebagai Safety Net: Data tidak bisa corrupt karena tidak ada in-place mutations
+  - Pure Functions untuk Deterministic Recovery: Fungsi dapat di-replay tanpa side effect yang unpredictable
+  - Pattern Matching untuk Explicit Error States: Error di-handle sebagai data, bukan exceptions yang tersembunyi
+  - Process Isolation untuk Fault Containment: Crash dalam satu process tidak mempengaruhi process lain
+
+Dibandingkan dengan paradigma imperative seperti Java, fault tolerance sering bergantung pada complex exception handling dengan mutable state recovery:
+
+```java
+// Traditional imperative - manual state management during failures
+public class TaskExecutor {
+    private TaskState currentState;  // MUTABLE - prone to corruption
+    private List<Task> pendingTasks; // MUTABLE - recovery complex
+    
+    public void executeTask(Task task) {
+        try {
+            currentState.markStarted(task);  // In-place modification
+            TaskResult result = runTaskLogic(task);  // May throw
+            currentState.markCompleted(task, result); // Another mutation
+            
+        } catch (Exception e) {
+            // State mungkin sudah termutasi partial
+            // Harus manual rollback ke consistent state
+            currentState.rollback(task);  // Error-prone
+            pendingTasks.add(task);       // Manual recovery logic
+            
+            // Re-throw atau log - error handling scattered
+            if (e instanceof TimeoutException) {
+                scheduleRetry(task);
+            } else {
+                markPermanentlyFailed(task);
+            }
+        }
+    }
+}
+```
+Dalam distributed computing framework seperti MiniHadoop, fault tolerance adalah kebutuhan fundamental, bukan sekadar fitur tambahan: *Map/Reduce tasks* dapat mengalami kegagalan karena berbagai kondisi runtime seperti memory exhaustion, disk full, atau network timeout; *worker nodes* mungkin crash atau menjadi unreachable selama job execution berlangsung; dan *data corruption* atau malformed input dapat menyebabkan task failures yang tidak terduga.
+
 
 
 ## 🚀 Panduan Penggunaan

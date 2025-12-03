@@ -241,7 +241,7 @@ defmodule MiniHadoop.ComputeTask.TaskResultStorage do
     :ets.select(ets_ref, match_spec)
   end
 
-  # File operations (unchanged)
+  # File operations
   defp fetch_keys_concurrently(keys, map_files, storage_dir) do
     keys_set = MapSet.new(keys)
 

@@ -3,6 +3,8 @@ defmodule MiniHadoop do
   alias MiniHadoop.Master.FileOperation
   alias MiniHadoop.Master.ComputeOperation
 
+
+
   def store_file(filename, file_path) when is_binary(filename) and is_binary(file_path) do
     FileOperation.store_file(filename, file_path)
   end
@@ -45,14 +47,36 @@ defmodule MiniHadoop do
       reduce_context: %{
         damping_factor: 0.85,
         total_pages: 41332
-      }
+      },
+      sort_result_opt: {:value, :desc}
     ])
 
     ComputeOperation.submit_job(init_job_spec)
-
-    # After init_job completes, run PageRank iteration
-    # The output will be at: /path/to/pagerank_results/pagerank_initialize_job123.json
   end
+
+  def test_page_rank_second_iter do
+    shared_dir = Application.get_env(:mini_hadoop, :shared_dir)
+    # Test 1: Initialize PageRank (first iteration)
+    {:ok, init_job_spec} = MiniHadoop.Models.JobSpec.create([
+      job_name: "pagerank_second_iter",
+      input_files: ["a.tsv"],
+      map_function: &MiniHadoop.Examples.PageRank.pagerank_mapper/2,
+      reduce_function: &MiniHadoop.Examples.PageRank.pagerank_reducer/2,
+      map_context: %{
+        pagerank_file: "#{shared_dir}/page_rank_iter_1.json",
+        damping_factor: 0.85,
+        total_pages: 41332
+      },
+      reduce_context: %{
+        damping_factor: 0.85,
+        total_pages: 41332
+      },
+      sort_result_opt: {:value, :desc}
+    ])
+
+    ComputeOperation.submit_job(init_job_spec)
+  end
+
 
   def file_op_info(task_id) when is_binary(task_id) do
     FileOperation.get_operation_info(task_id)

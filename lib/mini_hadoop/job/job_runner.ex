@@ -72,10 +72,7 @@ defmodule MiniHadoop.Job.JobRunner do
       |> notify_phase_start(phase_type)
       |> data_fetcher.()
       |> (fn state_with_data ->
-            data_list = input_formatter.(state_with_data)
-
-            # Lazyly evaluated
-            data_list
+          input_formatter.(state_with_data)
             |> Stream.each(fn chunk ->
               Task.start(fn ->
                 state_with_data
@@ -109,8 +106,7 @@ defmodule MiniHadoop.Job.JobRunner do
     completed = :ets.update_counter(state.job_spawned_task_counter_ref, completed_key, 1)
     failed = get_counter(state.job_spawned_task_counter_ref, failed_key)
     total = Map.get(state, total_tasks_field)
-
-    update_progress(task_type, completed, failed, total, state.job.id)
+    Task.start(fn -> update_progress(task_type, completed, failed, total, state.job.id) end)
     check_completion(state, task_type, completed, failed, total, next_phase)
   end
 
@@ -124,8 +120,6 @@ defmodule MiniHadoop.Job.JobRunner do
 
   # Message handlers using higher-order functions
   def handle_cast({:task_completed, task_id}, state) do
-    Logger.info("Task completed: #{task_id}")
-
     task_handler = if String.starts_with?(task_id, "red_") do
       &handle_reduce_task_completed/1
     else
@@ -136,7 +130,6 @@ defmodule MiniHadoop.Job.JobRunner do
   end
 
   def handle_cast({:task_failed, task_id, error}, state) do
-    Logger.error("Task failed: #{task_id}, error: #{error}")
 
     task_handler = if String.starts_with?(task_id, "red_") do
       &handle_reduce_task_failed/1
@@ -163,95 +156,81 @@ defmodule MiniHadoop.Job.JobRunner do
   def handle_info(:proceed_to_completion, state) do
     Logger.info("Job #{state.job.id}: Proceeding to completion")
 
-    result = state
-      |> fetch_all_reduce_results()
-      |> process_reduce_results()
-      |> write_results_to_file(state.result_path, state.job)
-      |> create_job_summary(state)
-    final_state = notify_job_completion(state, result)
+    stream = create_stream(state)
+
+    # Write both files
+    {json, txt} =
+      [Task.async(fn -> write_json_file(stream, state) end),
+       Task.async(fn -> write_txt_file(stream, state) end)]
+      |> Enum.map(&Task.await(&1, :infinity))
+      |> List.to_tuple()
+
+    final_state = notify_job_completion(state, %{
+      job_id: state.job.id,
+      json_file: json,
+      txt_file: txt,
+      sorted: state.job.sort_result_opt != nil
+    })
+
     {:stop, :normal, final_state}
   end
 
-  defp process_reduce_results({reduce_results, sort_result_opt}) do
-    case sort_result_opt do
-    nil -> reduce_results
-    {by}
-    end
-    reduce_results
-    |> Enum.flat_map(fn
-      {key, value} -> [{key, value}]
-      map when is_map(map) -> Map.to_list(map)
-      _ -> []
+  defp create_stream(state) do
+    state
+    |> fetch_all_reduce_results()
+    |> Stream.flat_map(fn
+      {k, v} -> [{k, v}]
+      map -> Map.to_list(map)
     end)
-    |> Enum.sort_by(fn {_key, value} -> -value end)
   end
 
-  defp write_results_to_file(reduce_results, result_path, job) do
-    # Save JSON version
-    json_file = save_json_file(reduce_results, result_path, job)
+  defp write_json_file(stream, state) do
+    path = Path.join(state.result_path, "#{state.job.job_name}_#{state.job.id}.json")
+    File.mkdir_p!(Path.dirname(path))
 
-    # Save ordered TXT version
-    txt_file = save_txt_file(reduce_results, result_path, job)
-
-    {json_file, txt_file}
+    stream
+    |> Enum.reduce({0, []}, fn {k, v}, {count, acc} ->
+      json = "\"#{k}\": #{Jason.encode!(v)}"
+      {count + 1, [json | acc]}
+    end)
+    |> then(fn {count, entries} ->
+      content = "{\n  " <> Enum.join(Enum.reverse(entries), ",\n  ") <> "\n}"
+      File.write!(path, content)
+      Logger.info("JSON: #{count} entries")
+      path
+    end)
   end
 
-  defp save_json_file(reduce_results, result_path, job) do
-    file_path = Path.join(result_path, "#{job.job_name}_#{job.id}.json")
-    directory = Path.dirname(file_path)
-    File.mkdir_p!(directory)
+  defp write_txt_file(stream, state) do
+    # Sort if needed
+    entries =
+      case state.job.sort_result_opt do
+        nil -> Enum.to_list(stream)
+        opt -> sort_entries(Enum.to_list(stream), opt)
+      end
 
-    # Create a map (won't be sorted in JSON)
-    result_map = Map.new(reduce_results)
-    json_data = Jason.encode!(result_map, pretty: true)
-
-    case File.write(file_path, json_data) do
-      :ok ->
-        Logger.info("Job #{job.id}: JSON results written to #{file_path}")
-        file_path
-
-      {:error, reason} ->
-        Logger.error("Job #{job.id}: Failed to write JSON results: #{reason}")
-        nil
+    # Create filename
+    suffix = case state.job.sort_result_opt do
+      nil -> "unsorted"
+      {by, dir} -> "sorted_by_#{by}_#{dir}"
     end
+
+    path = Path.join(state.result_path, "#{state.job.job_name}_#{state.job.id}_#{suffix}.txt")
+    File.mkdir_p!(Path.dirname(path))
+
+    content = entries |> Enum.map(fn {k, v} -> "#{k}\t#{v}" end) |> Enum.join("\n")
+    header = "# #{suffix |> String.replace("_", " ")} - Total: #{length(entries)} entries\n"
+
+    File.write!(path, header <> content)
+    path
   end
 
-  defp save_txt_file(reduce_results, result_path, job) do
-    file_path = Path.join(result_path, "#{job.job_name}_#{job.id}_sorted.txt")
-    directory = Path.dirname(file_path)
-    File.mkdir_p!(directory)
+  defp sort_entries(entries, {:key, :asc}), do: Enum.sort_by(entries, &elem(&1, 0))
+  defp sort_entries(entries, {:key, :desc}), do: Enum.sort_by(entries, &elem(&1, 0), :desc)
+  defp sort_entries(entries, {:value, :asc}), do: Enum.sort_by(entries, &elem(&1, 1))
+  defp sort_entries(entries, {:value, :desc}), do: Enum.sort_by(entries, &elem(&1, 1), :desc)
+  defp sort_entries(entries, _), do: Enum.sort_by(entries, &{-elem(&1, 1), elem(&1, 0)})
 
-    # Create ordered TXT file
-    txt_content =
-      reduce_results
-      |> Enum.map(fn {key, value} -> "#{key}\t#{value}" end)
-      |> Enum.join("\n")
-
-    # Add header with count
-    header = "# Sorted results - Total: #{length(reduce_results)} entries\n"
-    content = header <> txt_content
-
-    case File.write(file_path, content) do
-      :ok ->
-        Logger.info("Job #{job.id}: TXT results written to #{file_path}")
-        file_path
-
-      {:error, reason} ->
-        Logger.error("Job #{job.id}: Failed to write TXT results: #{reason}")
-        nil
-    end
-  end
-
-  defp create_job_summary({json_file, txt_file}, state) do
-    %{
-      job_id: state.job.id,
-      total_map_tasks: state.total_map_tasks,
-      total_reduce_tasks: state.total_reduce_tasks,
-      json_results: json_file,
-      txt_results: txt_file,
-      success: not is_nil(json_file) and not is_nil(txt_file)
-    }
-  end
 
   def handle_info({:job_failed, error}, state) do
     Logger.error("Job #{state.job.id} failed: #{inspect(error)}")
@@ -282,7 +261,7 @@ defmodule MiniHadoop.Job.JobRunner do
       timeout: 15_000
     )
     |> Enum.flat_map(fn
-      {:ok, results} -> {results, state.sort_result_opt}
+      {:ok, results} -> results
       _ -> []
     end)
   end
@@ -364,7 +343,6 @@ defmodule MiniHadoop.Job.JobRunner do
       |> Task.async_stream(
         fn storage_pid ->
           try do
-            # ADD TIMEOUT to GenServer.call (30 seconds should be plenty)
             case GenServer.call(storage_pid, :get_sample_keys, 60_000) do
               {:ok, keys} ->
                 Logger.info("Received #{length(keys)} keys from #{inspect(storage_pid)}")
@@ -383,7 +361,7 @@ defmodule MiniHadoop.Job.JobRunner do
         end,
         max_concurrency: length(storage_pids),
         ordered: false,
-        timeout: 80_000  # Overall timeout for the whole async_stream
+        timeout: :infinity
       )
       |> Enum.flat_map(fn
         {:ok, keys} -> keys
@@ -649,6 +627,7 @@ defmodule MiniHadoop.Job.JobRunner do
   def terminate(reason, state) do
     Logger.info("Job #{state.job.id} terminated: #{inspect(reason)}")
     stop_all_task_runners(state.worker_process_map)
+    :erlang.garbage_collect(self())
   end
 
   # Counter and task dispatch functions
@@ -666,44 +645,6 @@ defmodule MiniHadoop.Job.JobRunner do
     value
   end
 
-  defp fetch_all_unique_keys(state) do
-    storage_pids = Map.values(state.worker_process_map)
-                   |> Enum.map(fn {storage_pid, _runner_pid} -> storage_pid end)
-
-    results =
-      storage_pids
-      |> Task.async_stream(
-        fn storage_pid ->
-          case GenServer.call(storage_pid, :get_unique_keys, 10_000) do
-            {:ok, keys} -> {storage_pid, {:ok, keys}}
-            {:error, reason} -> {storage_pid, {:error, reason}}
-          end
-        end,
-        max_concurrency: length(storage_pids),
-        timeout: 15_000
-      )
-      |> Enum.map(fn
-        {:ok, result} -> result
-        {:exit, reason} -> {:error, {:task_exit, reason}}
-      end)
-
-    # Separate successful results from errors
-    {successful, errors} =
-      Enum.split_with(results, fn
-        {_pid, {:ok, _keys}} -> true
-        _ -> false
-      end)
-
-    # Log any errors
-    if errors != [] do
-      Logger.warning("Failed to fetch keys from some storage nodes: #{inspect(errors)}")
-    end
-
-    # Build map of storage_pid -> keys MapSet
-    successful
-    |> Enum.map(fn {storage_pid, {:ok, keys}} -> {storage_pid, keys} end)
-    |> Map.new()
-  end
 
   defp fetch_all_reduce_results(state) do
     storage_pids = Map.values(state.worker_process_map)

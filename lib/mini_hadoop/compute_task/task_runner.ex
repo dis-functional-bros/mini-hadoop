@@ -191,11 +191,11 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
       case task.type do
         :map ->
           :ok = GenServer.call(state.storage_pid, {:store_map_results, task.output_data}, :infinity)
-          Logger.info("Map task #{task.id} results saved to storage")
+          # Logger.info("Map task #{task.id} results saved to storage")
 
         :reduce ->
           :ok = GenServer.call(state.storage_pid, {:store_reduce_results, task.output_data}, :infinity)
-          Logger.info("Reduce task #{task.id} saved #{length(task.output_data)} results to storage")
+          # Logger.info("Reduce task #{task.id} saved #{length(task.output_data)} results to storage")
       end
     rescue
       error ->
