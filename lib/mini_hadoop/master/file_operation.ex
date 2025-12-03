@@ -99,7 +99,6 @@ defmodule MiniHadoop.Master.FileOperation do
         next_id: state.next_id + 1
     }
 
-    # Start operation based on type
     Task.start(fn ->
       case type do
         :store -> execute_store_operation(task)
@@ -133,16 +132,14 @@ defmodule MiniHadoop.Master.FileOperation do
     # Send initial state update via cast (async)
     GenServer.cast(__MODULE__, {:update_operation, task.id, task})
 
-    # Process file in chunks and update progress
     result =
       File.stream!(task.file_path, block_size, [:read, :binary])
       |> Stream.with_index()
-      |> Stream.chunk_every(@batch_size)  # Process 10 blocks at a time
+      |> Stream.chunk_every(@batch_size)
       |> Enum.reduce_while({:ok, [], 0}, fn chunk, {status, acc_blocks, processed_count} ->
         case status do
           {:error, _} -> {:halt, {status, acc_blocks, processed_count}}
           _ ->
-            # Process current chunk
             chunk_result =
               chunk
               |> Task.async_stream(
@@ -185,12 +182,10 @@ defmodule MiniHadoop.Master.FileOperation do
 
               case chunk_result do
                 {:ok, chunk_blocks} ->
-                  # Sort this chunk immediately while it's small
                   sorted_chunk_blocks =
                     chunk_blocks
                     |> Enum.sort_by(fn {index, _block_id} -> index end)
 
-                  # Update progress after each chunk
                   new_processed_count = processed_count + (length(chunk) * @replication_factor)
                   updated_task = FileTask.update_progress(
                     task,
@@ -200,13 +195,13 @@ defmodule MiniHadoop.Master.FileOperation do
                   )
 
                   # Send async update to avoid deadlock
+
                   GenServer.cast(__MODULE__, {:update_operation, task.id, updated_task})
 
                   # Prepend sorted chunk for O(1) performance
                   {:cont, {:ok, [sorted_chunk_blocks | acc_blocks], new_processed_count}}
 
                 {:error, reason} ->
-                  # Send final error state
                   failed_task = FileTask.mark_failed(task, reason, "Failed: #{inspect(reason)}")
                   GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
                   {:halt, {{:error, reason}, acc_blocks, processed_count}}
@@ -214,10 +209,9 @@ defmodule MiniHadoop.Master.FileOperation do
         end
       end)
 
-    # Handle final result
     case result do
       {{:error, reason}, _blocks, _processed} ->
-        # Already sent error state above
+
         {:error, reason}
 
       {:ok, reversed_chunk_list, final_processed} ->
@@ -227,10 +221,9 @@ defmodule MiniHadoop.Master.FileOperation do
           |> Enum.reverse()
           |> List.flatten()
 
-        # Blocks are now sorted! Just extract block_ids
         sorted_block_ids = Enum.map(sorted_block_ids_with_index, fn {_index, block_id} -> block_id end)
 
-        # Final progress update to 100%
+
         task_with_final_progress = FileTask.update_progress(
           task,
           total_operations,
@@ -245,7 +238,6 @@ defmodule MiniHadoop.Master.FileOperation do
 
         MiniHadoop.Master.MasterNode.register_file_blocks(task.filename, sorted_block_ids)
 
-        # Send final success state
         GenServer.cast(__MODULE__, {:update_operation, task.id, completed_task})
         {:ok, completed_task}
     end
@@ -267,11 +259,9 @@ defmodule MiniHadoop.Master.FileOperation do
           task = FileTask.update_progress(task, 0, num_blocks, "Retrieving #{num_blocks} blocks")
           GenServer.cast(__MODULE__, {:update_operation, task.id, task})
 
-          # Create output file path
           default_path = Path.join(retrieve_result_path, task.filename)
           :ok = File.mkdir_p(retrieve_result_path)
 
-          # OPEN FILE ONCE for streaming write
           {:ok, file_handle} = File.open(default_path, [:write, :raw, :binary])
 
           result =
@@ -295,7 +285,7 @@ defmodule MiniHadoop.Master.FileOperation do
                 # Add block to buffer
                 new_buffer = [{index, block_data} | buffer]
 
-                # Check if we reached batch size
+                #
                 if length(new_buffer) >= @batch_size do
                   # Sort blocks by index to maintain correct order
                   sorted_batch =
@@ -315,7 +305,7 @@ defmodule MiniHadoop.Master.FileOperation do
                         "Processed #{new_count}/#{num_blocks} blocks"
                       )
                       GenServer.cast(__MODULE__, {:update_operation, task.id, updated_task})
-                      # Reset buffer and continue
+
                       {:cont, {:ok, [], new_count}}
 
                     {:error, reason} ->
@@ -361,13 +351,11 @@ defmodule MiniHadoop.Master.FileOperation do
               error
           end
 
-          # CLOSE FILE regardless of result
           :ok = File.close(file_handle)
 
           case final_result do
             {:ok, processed_count} ->
               if processed_count == num_blocks do
-                # Final update progress
                 task_with_final_progress = FileTask.update_progress(
                   task,
                   num_blocks,
@@ -379,7 +367,7 @@ defmodule MiniHadoop.Master.FileOperation do
                 GenServer.cast(__MODULE__, {:update_operation, task.id, completed_task})
                 completed_task
               else
-                # Partial success - some blocks might have been written
+                # Partial success
                 completed_task = FileTask.mark_completed(task, "File partially reconstructed (#{processed_count}/#{num_blocks} blocks): #{default_path}")
                 GenServer.cast(__MODULE__, {:update_operation, task.id, completed_task})
                 completed_task
@@ -494,7 +482,6 @@ defmodule MiniHadoop.Master.FileOperation do
                       {:cont, {:ok, new_processed_count}}
 
                     {:error, reason} ->
-                      # Send final error state
                       failed_task = FileTask.mark_failed(task, reason, "Failed: #{inspect(reason)}")
                       GenServer.cast(__MODULE__, {:update_operation, task.id, failed_task})
                       {:halt, {{:error, reason}, processed_count}}
@@ -502,18 +489,14 @@ defmodule MiniHadoop.Master.FileOperation do
               end
             end)
 
-          # Handle final result
           case result do
             {{:error, reason}, _processed_count} ->
-              # Already sent error state above
               {:error, reason}
 
             {:ok, final_processed} ->
-              # Final cleanup and progress update
               MasterNode.rebuild_tree_after_deletion()
               MasterNode.unregister_file_blocks(task.filename)
 
-              # Final progress update to 100%
               task_with_final_progress = FileTask.update_progress(
                 task,
                 num_blocks,

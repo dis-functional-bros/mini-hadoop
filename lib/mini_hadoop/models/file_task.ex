@@ -5,25 +5,19 @@ defmodule MiniHadoop.Models.FileTask do
 
   defstruct [
     :id,
-    # :store, :read, :delete
-    :type,
+    :type,       # :store, :read, :delete
     :filename,
     :file_path,
-    # :pending, :running, :completed, :failed
-    :status,
-    # 0-100
-    :progress,
+    :status,        # :pending, :running, :completed, :failed
+    :progress,     # 0-100
     :error_reason,
     :started_at,
     :completed_at,
-    # in milliseconds
-    :total_time,
-    # PID or node
-    :created_by,
+    :total_time,  # in milliseconds
+    :created_by, # PID or node
     :blocks_processed,
     :total_blocks,
-    # Current status message
-    :message
+    :message     # Current status message
   ]
 
   @default_attrs %{
@@ -68,20 +62,16 @@ defmodule MiniHadoop.Models.FileTask do
     {started_at, completed_at, total_time} =
       case status do
         :started ->
-          # Only set started_at
           {now, nil, nil}
 
         :running ->
-          # Keep existing started_at, no completed_at yet
           {task.started_at || now, nil, nil}
 
         :completed ->
-          # Set completed_at and calculate total time in seconds
           started = task.started_at || now
           {started, now, DateTime.diff(now, started, :second)}
 
         :failed ->
-          # Set completed_at and calculate total time in seconds
           started = task.started_at || now
           {started, now, DateTime.diff(now, started, :second)}
 

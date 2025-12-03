@@ -1,7 +1,6 @@
 defmodule MiniHadoop.Examples.WordCount do
   @moduledoc """
   Memory-efficient word count with boundary-aware streaming.
-  Processes text word by word or line by line without full memory load.
   """
 
   # Valid word characters (Unicode-aware)
@@ -27,16 +26,13 @@ defmodule MiniHadoop.Examples.WordCount do
 
   @doc """
   Streams text word by word using a state machine approach.
-
-  This creates a stream that yields one word at a time,
-  perfect for processing large files without loading them entirely.
   """
   def stream_words(text) when is_binary(text) do
     Stream.resource(
       # Start function: initialize with text and position
       fn -> {text, 0, byte_size(text)} end,
 
-      # Next function: find next word
+      # ]find next word
       fn
         {_, pos, total} when pos >= total ->
           {:halt, nil}
@@ -50,7 +46,6 @@ defmodule MiniHadoop.Examples.WordCount do
           end
       end,
 
-      # Stop function: cleanup (nothing needed)
       fn _ -> :ok end
     )
     |> Stream.filter(&valid_word?/1)
@@ -59,9 +54,6 @@ defmodule MiniHadoop.Examples.WordCount do
   @doc """
   Finds the next word in text starting from given position.
   Returns {:word, word, new_position} or :no_word.
-
-  This is the core boundary-aware logic that processes text
-  character by character without creating intermediate strings.
   """
   def next_word(text, start_pos, total) do
     # Step 1: Skip to first word character
@@ -70,20 +62,16 @@ defmodule MiniHadoop.Examples.WordCount do
     if word_start >= total do
       :no_word
     else
-      # Step 2: Find word end
       word_end = find_word_end(text, word_start, total)
 
-      # Step 3: Extract word
       word = binary_part(text, word_start, word_end - word_start)
 
-      # Step 4: Skip to after word for next iteration
       next_pos = skip_to_next_start(text, word_end, total)
 
       {:word, word, next_pos}
     end
   end
 
-  # Skip non-word characters
   defp skip_to_word_start(text, pos, total) when pos < total do
     <<_::binary-size(pos), char::utf8, _::binary>> = text
 
@@ -96,7 +84,6 @@ defmodule MiniHadoop.Examples.WordCount do
 
   defp skip_to_word_start(_, pos, _), do: pos
 
-  # Find where the word ends
   defp find_word_end(text, pos, total) when pos < total do
     <<_::binary-size(pos), char::utf8, _::binary>> = text
 
@@ -109,7 +96,6 @@ defmodule MiniHadoop.Examples.WordCount do
 
   defp find_word_end(_, pos, _), do: pos
 
-  # Skip past current word to find next starting position
   defp skip_to_next_start(text, pos, total) do
     skip_to_word_start(text, pos, total)
   end
@@ -127,9 +113,7 @@ defmodule MiniHadoop.Examples.WordCount do
 
   @doc """
   Alternative: Stream line by line, then words within each line.
-
   Useful for text with clear line boundaries (logs, CSV, etc.)
-  where you might want per-line statistics.
   """
   def stream_lines_then_words(text) when is_binary(text) do
     Stream.resource(
@@ -156,7 +140,6 @@ defmodule MiniHadoop.Examples.WordCount do
     |> Stream.filter(&valid_word?/1)
   end
 
-  # Find next line boundary
   defp next_line(text, pos) do
     case :binary.match(text, "\n", [{:scope, {pos, byte_size(text) - pos}}]) do
       {line_end, _} ->
@@ -182,7 +165,6 @@ defmodule MiniHadoop.Examples.WordCount do
 
   @doc """
   Chunk-based streaming with overlap for word boundaries.
-
   Processes text in fixed-size chunks but ensures words aren't split
   at chunk boundaries by overlapping chunks.
   """
@@ -195,11 +177,11 @@ defmodule MiniHadoop.Examples.WordCount do
           {:halt, nil}
 
         {text, pos, total} ->
-          # Read chunk with extra room for word boundary
+          # Read chunk with extra room
           chunk_end = min(pos + chunk_size + 100, total)
           chunk = binary_part(text, pos, chunk_end - pos)
 
-          # Find last word boundary in chunk (except for last chunk)
+          # Find end of last full word in chunk
           actual_chunk_end =
             if chunk_end < total do
               find_last_word_boundary(chunk) + pos
@@ -248,7 +230,7 @@ defmodule MiniHadoop.Examples.WordCount do
   end
 
   @doc """
-  Reducer with streaming support for large value lists.
+  Reducer with streaming support.
   """
   def word_count_reducer(data, _context) when is_map(data) do
     try do

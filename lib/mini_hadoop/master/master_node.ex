@@ -75,10 +75,8 @@ defmodule MiniHadoop.Master.MasterNode do
         | last_heartbeat: :os.system_time(:millisecond)
       })
 
-    # register worker to compute_operation
     ComputeOperation.register_worker(worker_state.pid)
 
-    # Monitor worker process
     Process.monitor(worker_state.pid)
 
     new_tree = rebuild_tree(new_workers)
@@ -118,7 +116,6 @@ defmodule MiniHadoop.Master.MasterNode do
         blocks_with_owners =
           block_ids
           |> Enum.map(fn block_id ->
-            # Get list of worker pids that have this block and pick the first one
             index_str = String.replace(block_id, "#{filename}_block_", "")
 
             case Integer.parse(index_str) do
@@ -285,7 +282,6 @@ defmodule MiniHadoop.Master.MasterNode do
           %{info | last_heartbeat: :os.system_time(:millisecond)}
         end)
 
-      Logger.debug("Received heartbeat from #{worker_hostname}")
       {:noreply, %{state | workers: updated_workers}}
     else
       Logger.warning("Received heartbeat from unknown worker #{worker_hostname}")
@@ -307,12 +303,10 @@ defmodule MiniHadoop.Master.MasterNode do
             new_tree_after_removal = :gb_trees.delete(key, state.tree)
             GenServer.reply(waiting_from, {:ok, worker_pid})
 
-            # Continue processing more queue items
             GenServer.cast(self(), :process_queue)
             {:noreply, %{state | tree: new_tree_after_removal, wait_queue: new_queue}}
 
           :not_found ->
-            # No worker found, stop processing
             {:noreply, state}
         end
     end
