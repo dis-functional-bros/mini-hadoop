@@ -56,7 +56,7 @@ defmodule MiniHadoop do
 
   def test_page_rank_second_iter do
     shared_dir = Application.get_env(:mini_hadoop, :shared_dir)
-    # Test 1: Initialize PageRank (first iteration)
+    # Test 2: PageRank (with Page Rank File)
     {:ok, init_job_spec} = MiniHadoop.Models.JobSpec.create([
       job_name: "pagerank_second_iter",
       input_files: ["a.tsv"],

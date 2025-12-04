@@ -373,7 +373,11 @@ defmodule MiniHadoop.Job.JobRunner do
       |> Enum.uniq()
 
     # Calculate total reduce tasks
-    total_reduce_tasks = if sample_keys == [], do: 1, else: min(length(storage_pids)*@max_num_of_reducer_each_worker, length(sample_keys))+1
+    total_reduce_tasks =
+      min(
+        length(storage_pids) * @max_num_of_reducer_each_worker,
+        length(sample_keys)
+      ) + 1
 
     Logger.info("""
     Collected #{length(sample_keys)} unique sample keys
