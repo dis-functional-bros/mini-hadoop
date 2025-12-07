@@ -466,10 +466,11 @@ Akan menghasilkan 3 file dengan ukuran variatif di direktori test_file . File te
 2. Membersihkan file-file yang telah dihasilkan
 
 ```bash
-sudo rm -rf ./data/* ./retrieve_files/* ./job_results/* ./temp/* ./logs/*
+sudo rm -rf ./data ./retrieved_files ./job_results ./temp ./logs
+mkdir -p ./data ./retrieved_files ./job_results ./temp ./logs
 ```
 
-Untuk memudahkan debugging, volume container telah di petakan ke dalam beberapa direktori khusus di dalam proyek. Untuk membersihkan file yang dihasilkan oleh program, kita dapat menggunakan perintah di atas.
+Untuk memudahkan debugging, volume container telah di petakan ke dalam beberapa direktori khusus di dalam proyek. Untuk membersihkan file yang dihasilkan oleh program, kita dapat menggunakan perintah di atas (menghapus folder dan membuatnya kembali dalam keadaan kosong).
 
 
 ### Operasi Berkas Dasar
