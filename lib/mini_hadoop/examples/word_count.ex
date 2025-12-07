@@ -5,7 +5,6 @@ defmodule MiniHadoop.Examples.WordCount do
 
   # Valid word characters (Unicode-aware)
   @valid_word_chars ~r/[\p{L}\p{Nd}_'-]/
-  @word_boundary ~r/[^\p{L}\p{Nd}_'-]+/
 
   @doc """
   Main mapper using word-by-word streaming for maximum memory efficiency.

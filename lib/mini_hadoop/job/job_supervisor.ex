@@ -4,7 +4,6 @@ defmodule MiniHadoop.Job.JobSupervisor do
   Interface for dynamically starting and managing job processes.
   """
   alias MiniHadoop.Models.JobSpec
-  alias MiniHadoop.Job.JobRunner
 
   # Public API
   @spec start_job(JobSpec.t(), [pid()]) ::
@@ -39,7 +38,7 @@ defmodule MiniHadoop.Job.JobSupervisor do
   end
 
   @spec find_job_pid(String.t()) :: pid() | nil
-  def find_job_pid(job_id) do
+  def find_job_pid(_job_id) do
     list_jobs()
     |> Enum.find_value(fn
       {_id, pid, _type, _modules} ->

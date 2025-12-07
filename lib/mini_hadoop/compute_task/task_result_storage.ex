@@ -231,7 +231,7 @@ defmodule MiniHadoop.ComputeTask.TaskResultStorage do
           # start_key < key ≤ end_key (lower exclusive, upper inclusive)
           # CORRECT: Use :andalso to combine conditions
           [{{:'$1'}, [
-            {:'andalso',
+            {:andalso,
               {:'>', :'$1', start_key},
               {:'=<', :'$1', end_key}
             }
@@ -289,20 +289,6 @@ defmodule MiniHadoop.ComputeTask.TaskResultStorage do
     Map.merge(map1, map2, fn _key, values1, values2 ->
       # values1 and values2 are both lists, just concatenate them
       values1 ++ values2
-    end)
-  end
-
-  defp fetch_single_key_simple(key, map_files, storage_dir) do
-    Enum.flat_map(map_files, fn file ->
-      file_path = Path.join(storage_dir, file)
-
-      case File.read(file_path) do
-        {:ok, binary} ->
-          key_value_pairs = :erlang.binary_to_term(binary)
-          for {k, v} <- key_value_pairs, k == key, do: v
-        {:error, _} ->
-          []
-      end
     end)
   end
 

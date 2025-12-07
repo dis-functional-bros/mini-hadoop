@@ -159,7 +159,7 @@ defmodule MiniHadoop.Master.MasterNode do
         # Get list of worker pids that already have this block
         exclude_pids = Map.get(state.block_to_worker_mapping, block_id, [])
         case find_smallest_excluding(state.tree, exclude_pids) do
-          {:ok, {block_count, worker_pid} = key, hostname} ->
+          {:ok, {_block_count, worker_pid} = key, _hostname} ->
             new_tree = :gb_trees.delete(key, state.tree)
             {:reply, {:ok, worker_pid}, %{state | tree: new_tree}}
 
@@ -251,7 +251,7 @@ defmodule MiniHadoop.Master.MasterNode do
   @impl true
   def handle_call({:DOWN, worker_pid, _, _, _}, _from, state) do
     # TODO: complete implementation of re-replication of blocks
-    block_ids = Map.get(state.worker_to_block_mapping, worker_pid, [])
+    _block_ids = Map.get(state.worker_to_block_mapping, worker_pid, [])
 
     # 1. Get other worker that has the block
     # 2. Pick a new worker where the block will be replicated
@@ -299,7 +299,7 @@ defmodule MiniHadoop.Master.MasterNode do
         exclude_pids = Map.get(state.block_to_worker_mapping, block_id, [])
 
         case find_smallest_excluding(state.tree, exclude_pids) do
-          {:ok, {block_count, worker_pid} = key, hostname} ->
+          {:ok, {_block_count, worker_pid} = key, _hostname} ->
             new_tree_after_removal = :gb_trees.delete(key, state.tree)
             GenServer.reply(waiting_from, {:ok, worker_pid})
 
@@ -328,7 +328,7 @@ defmodule MiniHadoop.Master.MasterNode do
 
   defp find_in_iterator_excluding(iterator, exclude_pids) do
     case :gb_trees.next(iterator) do
-      {{block_count, worker_pid}=key, hostname, next_iterator} ->
+      {{_block_count, worker_pid}=key, hostname, next_iterator} ->
         if worker_pid in exclude_pids do
           find_in_iterator_excluding(next_iterator, exclude_pids)
         else
