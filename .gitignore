@@ -27,6 +27,8 @@ mini_hadoop-*.tar
 
 data
 *.txt
+/temp
+/logs
 
 job_results
 retrieved_files
