@@ -12,24 +12,22 @@ Sebuah Distributed File System (DFS) yang terinspirasi dari Hadoop, dikembangkan
 
 ## 🏗️ Arsitektur Sistem
 
-### Model Master–Slave
 
-- **NameNode (Master)**:
+MiniHadoop dibangun menggunakan arsitektur Master-Worker berbasis **Elixir OTP** yang memanfaatkan kekuatan *actor model* untuk konkurensi dan toleransi kesalahan.
 
-  - Mengelola metadata sistem berkas.
-  - Melacak lokasi setiap blok yang tersimpan pada DataNode.
-  - Mengoordinasikan operasi berkas dan tugas MapReduce.
+*   **Master Node**:
+    *   **MasterNode**: Mengelola pendaftaran worker (membership), penyeimbangan beban (*load balancing*) menggunakan struktur data `gb_trees`, dan pemantauan kesehatan cluster melalui mekanisme *heartbeat*.
+    *   **FileOperation**: Menangani operasi sistem berkas terdistribusi (DFS), termasuk manajemen metadata blok dan strategi penempatan data.
+    *   **ComputeOperation**: Mengelola siklus hidup job, antrian job (*job queue*), dan koordinasi status global job.
+    *   **JobSupervisor**: `DynamicSupervisor` yang membuat dan mengawasi proses `JobRunner` yang terisolasi untuk setiap job yang aktif.
 
-- **DataNode + TaskTracker (Slave)**:
-  - Menyimpan blok data pada penyimpanan lokal.
-  - Menjalankan tugas MapReduce.
-  - Mengirimkan _heartbeat_ ke NameNode sebagai indikator status node.
+*   **Worker Node**:
+    *   **WorkerNode**: Proses utama (*GenServer*) yang memelihara koneksi persisten ke Master dan melaporkan status kapasitas serta ketersediaan node.
+    *   **TaskSupervisor**: `Task.Supervisor` yang mengeksekusi fungsi Map dan Reduce pengguna secara aman dan terisolasi (*sandboxed execution*).
+    *   **RunnerAndStorageSupervisor**: `DynamicSupervisor` yang mengelola komponen pendukung untuk eksekusi tugas dan penyimpanan hasil sementara.
 
-### Komponen MapReduce
-
-- **JobTracker**: Mengelola pengajuan pekerjaan dan penjadwalan tugas.
-- **TaskTracker**: Mengeksekusi _map tasks_ dan _reduce tasks_.
-- **Pluggable Processing**: Pengguna dapat mendefinisikan fungsi map dan reduce sendiri.
+*   **Job Execution Flow**:
+    *   **JobRunner**: Proses orkestrator (satu per job) yang bertanggung jawab memecah input menjadi beberapa task, menjadwalkan task ke worker yang tersedia, menangani kegagalan task (*fault tolerance*), dan melakukan agregasi hasil akhir.
 
 ## 🧠 Wawasan Pengembangan & Tantangan Teknis
 
@@ -455,9 +453,28 @@ docker exec -it master_node iex --remsh master@master --cookie secret
 
 ## 📚 Contoh Penggunaan API
 
-Di dalam Interactive Shell MasterNode kita dapat mengakses beberapa API yang telah disediakan
+### Text File Generation and File Cleanup
+
+1. Generate text file for word count job
+
+```bash
+python3 ./test_file/file_gen.py
+```
+Akan menghasilkan 3 file dengan ukuran variatif di direktori test_file . File tersebut adalah `small.txt` 4MB, `medium.txt` 16MB, dan `large.txt` 256MB.
+
+
+2. Membersihkan file-file yang telah dihasilkan
+
+```bash
+sudo rm -rf ./data/* ./retrieve_files/* ./job_results/* ./temp/* ./logs/*
+```
+
+Untuk memudahkan debugging, volume container telah di petakan ke dalam beberapa direktori khusus di dalam proyek. Untuk membersihkan file yang dihasilkan oleh program, kita dapat menggunakan perintah di atas.
+
 
 ### Operasi Berkas Dasar
+
+Di dalam Interactive Shell MasterNode kita dapat mengakses beberapa API yang telah disediakan
 
 1. Menyimpan file ke dalam DFS
 
@@ -496,7 +513,27 @@ MiniHadoop.file_op_info("id_operasi_file")
 
 ### MapReduce Job
 
-1. Mendefinisikan Spesifikasi dan Menjalankan MapReduce Job
+1. Mendefinisikan Spesifikasi dan Menjalankan MapReduce Job.
+
+Ada beberapa keyword yang wajib untuk mendefinisikan spesifikasi job:
+
+- `job_name`: Nama job (String).
+- `input_files`: List nama file input yang akan diolah (List of String). File harus sudah tersimpan di DFS.
+- `map_function`: Function yang akan dijalankan pada map phase.
+  - Menerima input: `(line :: String.t(), context :: map())` atau `(line :: String.t())`.
+  - Mengembalikan output: List of tuples `[{key, value}, ...]`.
+- `reduce_function`: Function yang akan dijalankan pada reduce phase.
+  - Menerima input: `({key, values}, context :: map())` atau `({key, values})`.
+  - Mengembalikan output: Tuple `{key, result}`.
+
+Optional keyword:
+
+- `output_dir`: Direktori tujuan penyimpanan hasil job (String), bila tidak diberikan maka hasil akan disimpan di direktori default ./job_result proyek
+- `map_context`: Map yang berisi parameter tambahan yang bisa diakses di dalam map function. 
+- `reduce_context`: Map yang berisi parameter tambahan yang bisa diakses di dalam reduce function.
+- `sort_result_opt`: Tuple yang menentukan opsi sorting hasil reduce phase, contoh: `{:value, :desc}` atau `{:key, :asc}`.  Element pertama tuple adalah field yang akan diurutkan (:key atau :value), element kedua adalah arah sorting (:asc atau :desc).
+
+Untuk membuat spesifikasi job, gunakan fungsi `MiniHadoop.Models.JobSpec.create/1`. Fungsi ini akan memvalidasi semua parameter yang diberikan. Jika spesifikasi valid, fungsi akan mengembalikan tuple `{:ok, job_spec}`. Jika terdapat kesalahan parameter, fungsi akan mengembalikan `{:error, reason}`.
 
 ```elixir
 {:ok, job_spec} = MiniHadoop.Models.JobSpec.create([
@@ -508,34 +545,39 @@ MiniHadoop.file_op_info("id_operasi_file")
 MiniHadoop.submit_job(job_spec)
 ```
 
-Hasil MapReduce Job akan disimpan di direktori ./job_result proyek
 
-nilai map_module dan reduce_module merupakan module yang mengimplementasikan behaviour MiniHadoop.Map.MapBehaviour dan MiniHadoop.Reduce.ReduceBehaviour
+### Output Job
 
-Anda dapat membuat implementasi custom untuk Map dan Reduce dengan membuat module baru yang mengimplementasikan behaviour MiniHadoop.Map.MapBehaviour dan MiniHadoop.Reduce.ReduceBehaviour.
+Setiap job akan menghasilkan dua file output di direktori hasil:
 
-```elixir
-defmodule MiniHadoop.Map.Examples.CostumMap do
-  @behaviour MiniHadoop.Map.MapBehaviour
+1. **JSON File** (`.json`): Berisi hasil lengkap dalam format JSON object.
+2. **Text File** (`.txt`): Berisi hasil dalam format baris per baris `key[tab]value`.
 
-  @impl true
-  def map(data, context) do
-    # Implementasi costum map
-  end
-end
+**JSON Output Example:**
 
-
-defmodule MiniHadoop.Reduce.Examples.CostumReduce do
-  @behaviour MiniHadoop.Reduce.ReduceBehaviour
-
-  @impl true
-  def reduce(data, context) do
-    # Implementasi costum reduce
-  end
-end
+```json
+{
+  "key_1": "value_1",
+  "key_2": "value_2",
+  "key_3": "value_3",
+  "key_4": "value_4",
+  "key_5": "value_5"
+}
 ```
 
-## 🔬 Algoritma MapReduce yang Didukung
+**Text Output Example:**
+
+```text
+# sorted/unsorted - Total: 5 entries
+key_1	value_1
+key_2	value_2
+key_3	value_3
+key_4	value_4
+key_5	value_5
+```
+
+
+## 🔬 Contoh Algoritma MapReduce yang Didukung
 
 MiniHadoop menyediakan implementasi untuk dua algoritma MapReduce klasik yang sering digunakan dalam distributed computing: **WordCount** dan **PageRank**. Kedua algoritma ini mendemonstrasikan kekuatan paradigm functional programming dalam menangani pemrosesan data terdistribusi.
 
@@ -587,22 +629,8 @@ MiniHadoop.store_file("document.txt", "/path/to/large/document.txt")
   reduce_function: &MiniHadoop.Examples.WordCount.word_count_reducer/2
 ])
 
-{:ok, job_id} = MiniHadoop.submit_job(job_spec)
+MiniHadoop.submit_job(job_spec)
 ```
-
-**Output Example:**
-
-```json
-{
-  "the": 1542,
-  "distributed": 89,
-  "system": 156,
-  "elixir": 67,
-  "functional": 45
-}
-```
-
----
 
 ### 2. PageRank Algorithm
 
@@ -625,7 +653,7 @@ Dimana:
 
 #### Implementation dalam MiniHadoop
 
-**Map Phase (First Iteration):**
+**Map Phase (First Iteration):** (Code simplified)
 
 ```elixir
 def pagerank_mapper(line, context) do
@@ -640,13 +668,16 @@ def pagerank_mapper(line, context) do
   # Distribute rank to outbound links
   rank_per_link = initial_rank / length(to_pages)
 
-  Enum.map(to_pages, fn to_page ->
+  result = Enum.map(to_pages, fn to_page ->
     {to_page, rank_per_link}
   end)
+
+  # Add baseline contribution for source page
+  [{from_page, (1 - damping_factor) / total_pages} | result]
 end
 ```
 
-**Map Phase (Subsequent Iterations):**
+**Map Phase (Subsequent Iterations):** (Code simplified)
 
 ```elixir
 def pagerank_mapper(line, context) do
@@ -662,24 +693,21 @@ def pagerank_mapper(line, context) do
   # Distribute current rank to outbound links
   rank_per_link = (damping_factor * current_rank) / length(to_pages)
 
-  Enum.map(to_pages, fn to_page ->
+  result = Enum.map(to_pages, fn to_page ->
     {to_page, rank_per_link}
   end)
+
+  # Add baseline contribution for source page
+  [{from_page, (1 - damping_factor) / total_pages} | result]
 end
 ```
 
 **Reduce Phase:**
 
 ```elixir
-def pagerank_reducer({page, incoming_ranks}, context) do
-  damping_factor = Map.get(context, :damping_factor, 0.85)
-  total_pages = Map.get(context, :total_pages, 1)
-
-  # Sum all incoming rank contributions
-  rank_sum = Enum.sum(incoming_ranks)
-
-  # Apply PageRank formula
-  final_rank = (1.0 - damping_factor) / total_pages + rank_sum
+def pagerank_reducer({page, incoming_ranks}, _context) do
+  # Sum all incoming rank contributions, already include damping factor contribution
+  final_rank = Enum.sum(incoming_ranks)
 
   {page, final_rank}
 end
@@ -700,10 +728,6 @@ PageRank membutuhkan iterative computation hingga convergence. MiniHadoop menduk
     damping_factor: 0.85,
     total_pages: 41332
   },
-  reduce_context: %{
-    damping_factor: 0.85,
-    total_pages: 41332
-  },
   sort_result_opt: {:value, :desc}
 ])
 
@@ -717,10 +741,6 @@ MiniHadoop.submit_job(first_job)
   reduce_function: &MiniHadoop.Examples.PageRank.pagerank_reducer/2,
   map_context: %{
     pagerank_file: "/shared/page_rank_iter_1.json",
-    damping_factor: 0.85,
-    total_pages: 41332
-  },
-  reduce_context: %{
     damping_factor: 0.85,
     total_pages: 41332
   },
@@ -760,7 +780,7 @@ Typically, PageRank converge setelah 10-50 iterasi tergantung pada:
 # Helper function untuk check convergence
 def check_convergence(previous_ranks, current_ranks, tolerance \\ 0.0001) do
   differences =
-    Map.merge(previous_ranks, current_ranks, fn _key, old_val, new_val |
+    Map.merge(previous_ranks, current_ranks, fn _key, old_val, new_val ->
       abs(new_val - old_val)
     end)
 
@@ -769,21 +789,37 @@ def check_convergence(previous_ranks, current_ranks, tolerance \\ 0.0001) do
 end
 ```
 
-**Output Example (Top 10 Pages):**
+**Output Example:**
 
+Unsorted json object result
 ```json
 {
   "homepage.html": 0.384729,
+  "blog_post_1.html": 0.067123,
+  "products.html": 0.054967,
   "main_article.html": 0.297156,
   "index.html": 0.201847,
   "about.html": 0.156892,
   "contact.html": 0.089234,
-  "blog_post_1.html": 0.067123,
-  "products.html": 0.054967,
   "services.html": 0.043821,
   "news.html": 0.038194,
   "faq.html": 0.032156
 }
+```
+
+Sorted/unsorted text file result
+```text
+# sorted/unsorted - Total: 10 entries
+homepage.html	0.384729
+main_article.html	0.297156
+index.html	0.201847
+about.html	0.156892
+contact.html	0.089234
+blog_post_1.html	0.067123
+products.html	0.054967
+services.html	0.043821
+news.html	0.038194
+faq.html	0.032156
 ```
 
 ---

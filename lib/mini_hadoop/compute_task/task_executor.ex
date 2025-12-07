@@ -1,7 +1,10 @@
 defmodule MiniHadoop.ComputeTask.TaskExecutor do
   @moduledoc """
-  Monadic task executor for MapReduce tasks.
-  Memory-optimized for large data (64MB+ map tasks) with minimal allocations.
+  Provides a monadic execution pipeline for MapReduce tasks.
+
+  This module is designed to handle potentially large datasets (e.g., 64MB+ map tasks)
+  by implementing aggressive memory management strategies, such as immediate data clearing
+  and forced garbage collection after heavy operations.
   """
   require Logger
 
@@ -10,18 +13,28 @@ defmodule MiniHadoop.ComputeTask.TaskExecutor do
   @type execution_result :: {:ok, ComputeTask.t()} | {:error, term()}
   @large_data_threshold 64_000_000  # 64MB - trigger aggressive memory management
 
-  # Monad operations (NO CHANGES - these are just wrappers)
+  # -- Monadic Wrappers --
+  @doc false
   def pure(task), do: {:ok, task}
+
+  @doc false
   def error(reason), do: {:error, reason}
   def bind({:ok, task}, func), do: func.(task)
   def bind({:error, reason}, _func), do: {:error, reason}
 
   @doc """
-  Task execution pipeline with aggressive memory management.
+  Executes a compute task through a memory-optimized pipeline.
+
+  Steps:
+  1. Fetch data
+  2. Execute user function
+  3. Normalize result
+  4. Mark complete
+
+  Triggers garbage collection before returning to keep memory footprint low.
   """
   @spec execute_task(ComputeTask.t()) :: execution_result()
   def execute_task(task) do
-    # Process memory optimization
     result =
       pure(task)
       |> bind(&fetch_task_data/1)
@@ -29,8 +42,8 @@ defmodule MiniHadoop.ComputeTask.TaskExecutor do
       |> bind(&normalize_user_result/1)
       |> bind(&mark_task_completed/1)
 
-    # CRITICAL: Force full garbage collection before returning
-    # Since each task runs in its own process, we want minimal memory footprint
+    # Force garbage collection to ensure immediate reclamation of large binaries
+    # allocated during the task execution.
     :erlang.garbage_collect(self())
 
     result
@@ -48,12 +61,11 @@ defmodule MiniHadoop.ComputeTask.TaskExecutor do
   defp fetch_map_data_memory_optimized(%{input_data: {block_id, worker_pids}} = task) do
     case fetch_block_with_fallback(block_id, worker_pids) do
       {:ok, data} ->
-        # CRITICAL: Clear input_data IMMEDIATELY after fetching
-        # This removes reference to potentially large external data structures
+        # Optimization: Clear `input_data` reference immediately to free memory
+        # if the garbage collector runs.
         task = %{task | data: data, input_data: :cleared}
 
-        # For very large data (>50MB), force GC after loading
-        if is_binary(data) and byte_size(data) > 50_000_000 do
+        if is_binary(data) and byte_size(data) > 64_000_000 do
           :erlang.garbage_collect(self())
         end
 
@@ -77,8 +89,7 @@ defmodule MiniHadoop.ComputeTask.TaskExecutor do
 
   defp fetch_block_with_fallback(_block_id, []), do: {:error, :all_workers_failed}
 
-  # Fetch reduce data with streaming to avoid loading all at once
-  # Fetch reduce data with streaming - now handles RANGES
+  # Fetch reduce data with streaming
   defp fetch_reduce_data_memory_optimized(task) do
     # task.input_data is now: {start_key, end_key, storage_pids}
     case fetch_reduce_values_streaming(task.input_data) do
@@ -121,20 +132,17 @@ defmodule MiniHadoop.ComputeTask.TaskExecutor do
   end
 
 
-  # Execute user function with memory safeguards
+  # Execute user function while monitoring memory usage
   defp execute_user_function(%{data: task_data, function: user_func, context: context} = task) do
-    # Measure data size for memory decisions
     data_size = if is_binary(task_data), do: byte_size(task_data), else: 0
 
     try do
       # Execute the user function
       raw_result = user_func.(task_data, context)
 
-      # CRITICAL: Clear the data field IMMEDIATELY after use
-      # This is where 64MB gets freed
+      # Optimization: Clear the input `data` immediately after use.
       task = %{task | raw_result: raw_result, data: :cleared}
 
-      # If we processed large data, force GC now
       if data_size > @large_data_threshold do
         :erlang.garbage_collect(self())
       end
@@ -202,27 +210,30 @@ defmodule MiniHadoop.ComputeTask.TaskExecutor do
     false
   end
 
-  # Mark task completed and clear all large data references
+  # Finalize task and release all data references
   defp mark_task_completed(%{normalized_result: result} = task) do
-    # Create completed task
     completed_task = ComputeTask.mark_completed(task, result)
 
-    # CRITICAL: Clear ALL large data fields from the returned task
-    # We only keep metadata, not the actual data
+    # Optimization: Nullify all data-heavy fields in the returned struct.
     cleaned_task = %{completed_task |
       data: nil,
       raw_result: nil,
       normalized_result: nil,
-      context: %{}  # Clear context which might hold references
+      context: %{}
     }
 
     {:ok, cleaned_task}
   end
 
-  # Optimized storage function - process in smaller batches
+  @doc """
+  Fetches values for a list of keys from distributed storage in batches.
+
+  This helper manages memory pressure by processing keys in smaller chunks
+  rather than loading all values into memory at once.
+  """
   def fetch_all_value_of_keys(input) do
     # Process in very small batches for memory efficiency
-    batch_size = max(div(length(input), 10), 10)  # 10 batches or minimum 10
+    batch_size = max(div(length(input), 10), 10)
 
     input
     |> Enum.chunk_every(batch_size)

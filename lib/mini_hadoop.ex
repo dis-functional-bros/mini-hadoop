@@ -1,9 +1,7 @@
 defmodule MiniHadoop do
-  require Logger
   alias MiniHadoop.Master.FileOperation
   alias MiniHadoop.Master.ComputeOperation
-
-
+  alias MiniHadoop.Models.JobSpec
 
   def store_file(filename, file_path) when is_binary(filename) and is_binary(file_path) do
     FileOperation.store_file(filename, file_path)
@@ -17,69 +15,69 @@ defmodule MiniHadoop do
     FileOperation.delete_file(filename)
   end
 
-  def submit_job(job) when is_map(job) do
+  def submit_job(job) when is_struct(job, JobSpec) do
     ComputeOperation.submit_job(job)
   end
 
-  def test_submit_job do
-    # test create a job spec
-    {:ok, job_spec} = MiniHadoop.Models.JobSpec.create([
-      job_name: "word_count_analysis",
-      input_files: ["med.txt"],
-      map_function: &MiniHadoop.Examples.WordCount.word_count_mapper/2,
-      reduce_function: &MiniHadoop.Examples.WordCount.word_count_reducer/2
-    ])
+  def word_count_submit_job do
+    {:ok, job_spec} =
+      JobSpec.create(
+        job_name: "word_count_analysis",
+        input_files: ["doc.txt"],
+        map_function: &MiniHadoop.Examples.WordCount.word_count_mapper/2,
+        reduce_function: &MiniHadoop.Examples.WordCount.word_count_reducer/2
+      )
 
     ComputeOperation.submit_job(job_spec)
   end
 
-  def test_page_rank do
-    # Test 1: Initialize PageRank (first iteration)
-    {:ok, init_job_spec} = MiniHadoop.Models.JobSpec.create([
-      job_name: "pagerank_first",
-      input_files: ["a.tsv"],
-      map_function: &MiniHadoop.Examples.PageRank.pagerank_mapper/2,
-      reduce_function: &MiniHadoop.Examples.PageRank.pagerank_reducer/2,
-      map_context: %{
-        damping_factor: 0.85,
-        total_pages: 41332
-      },
-      reduce_context: %{
-        damping_factor: 0.85,
-        total_pages: 41332
-      },
-      sort_result_opt: {:value, :desc}
-    ])
+  def page_rank_first_iter_submit_job do
+    # PageRank First Iteration
+    {:ok, init_job_spec} =
+      JobSpec.create(
+        job_name: "pagerank_first",
+        input_files: ["adjecency.tsv"],
+        map_function: &MiniHadoop.Examples.PageRank.pagerank_mapper/2,
+        reduce_function: &MiniHadoop.Examples.PageRank.pagerank_reducer/2,
+        map_context: %{
+          damping_factor: 0.85,
+          # Modify according to the total number of pages
+          total_pages: 41332
+        },
+        sort_result_opt: {:value, :desc}
+      )
 
     ComputeOperation.submit_job(init_job_spec)
   end
 
-  def test_page_rank_second_iter do
+  def page_rank_second_iter_submit_job do
     shared_dir = Application.get_env(:mini_hadoop, :shared_dir)
-    # Test 2: PageRank (with Page Rank File)
-    {:ok, init_job_spec} = MiniHadoop.Models.JobSpec.create([
-      job_name: "pagerank_second_iter",
-      input_files: ["a.tsv"],
-      map_function: &MiniHadoop.Examples.PageRank.pagerank_mapper/2,
-      reduce_function: &MiniHadoop.Examples.PageRank.pagerank_reducer/2,
-      map_context: %{
-        pagerank_file: "#{shared_dir}/page_rank_iter_1.json",
-        damping_factor: 0.85,
-        total_pages: 41332
-      },
-      reduce_context: %{
-        damping_factor: 0.85,
-        total_pages: 41332
-      },
-      sort_result_opt: {:value, :desc}
-    ])
+    # PageRank Second Iteration (with Page Rank File)
+    {:ok, init_job_spec} =
+      JobSpec.create(
+        job_name: "pagerank_second_iter",
+        input_files: ["adjecency.tsv"],
+        map_function: &MiniHadoop.Examples.PageRank.pagerank_mapper/2,
+        reduce_function: &MiniHadoop.Examples.PageRank.pagerank_reducer/2,
+        map_context: %{
+          # path to file in shared directory
+          pagerank_file: "#{shared_dir}/page_rank_iter_1.json",
+          damping_factor: 0.85,
+          # Modify according to the total number of pages
+          total_pages: 41332
+        },
+        sort_result_opt: {:value, :desc}
+      )
 
     ComputeOperation.submit_job(init_job_spec)
   end
-
 
   def file_op_info(task_id) when is_binary(task_id) do
     FileOperation.get_operation_info(task_id)
+  end
+
+  def job_info(job_id) when is_binary(job_id) do
+    ComputeOperation.get_job_info(job_id)
   end
 
   def cluster_info do
@@ -106,7 +104,7 @@ defmodule MiniHadoop do
     %{
       master_state: master_state,
       uptime: uptime,
-      started_at: app_start_time,
+      started_at: app_start_time
     }
   end
 end

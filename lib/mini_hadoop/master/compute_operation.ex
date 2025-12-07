@@ -78,8 +78,8 @@ defmodule MiniHadoop.Master.ComputeOperation do
     GenServer.call(__MODULE__, :get_workers)
   end
 
-  def get_job_status(job_id) do
-    GenServer.call(__MODULE__, {:get_job_status, job_id})
+  def get_job_info(job_id) do
+    GenServer.call(__MODULE__, {:get_job_info, job_id})
   end
 
   def list_running_jobs do
@@ -134,13 +134,15 @@ defmodule MiniHadoop.Master.ComputeOperation do
   end
 
   @impl true
-  def handle_call({:get_job_status, job_id}, _from, state) do
+  def handle_call({:get_job_info, job_id}, _from, state) do
     case state.job_executions[job_id] do
       nil ->
         {:reply, {:error, :not_found}, state}
 
       job_execution ->
-        {:reply, {:ok, job_execution}, state}
+        job_spec = state.job_specs[job_id]
+        job_info = format_job_info(job_spec, job_execution)
+        {:reply, {:ok, job_info}, state}
     end
   end
 
@@ -313,6 +315,27 @@ defmodule MiniHadoop.Master.ComputeOperation do
 
       {:error, reason} ->
         {:error, reason, state}
+    end
+  end
+
+  defp format_job_info(job_spec, job_execution) do
+    job_info = [
+      job_id: job_execution.job_id,
+      job_name: job_spec.job_name,
+      input_files: job_spec.input_files,
+      status: job_execution.status,
+      created_at: job_execution.created_at,
+      started_at: job_execution.started_at,
+      completed_at: job_execution.completed_at,
+      elapsed_time_ms: job_execution.elapsed_time_ms,
+      progress: job_execution.progress,
+      results: job_execution.results
+    ]
+
+    if job_execution.error do
+      job_info ++ [error: job_execution.error]
+    else
+      job_info
     end
   end
 end
