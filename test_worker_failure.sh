@@ -59,6 +59,8 @@ else
     exit 1
 fi
 
+sleep 5
+
 # Step 4: Check initial state
 echo -e "\n${YELLOW}Step 4: Checking initial cluster state...${NC}"
 echo "Workers before failure:"

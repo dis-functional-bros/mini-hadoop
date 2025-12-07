@@ -322,19 +322,44 @@ defmodule MiniHadoop.Master.MasterNode do
       |> Enum.reject(fn {_block_id, workers} -> workers == [] end)
       |> Map.new()
 
-    # remove dead worker from all mappings
-    new_workers = 
+    # Build map of how many blocks each worker received: %{worker_pid => count}
+    worker_block_counts =
+      Enum.reduce(replication_results, %{}, fn result, acc ->
+        case result do
+          {:ok, {:ok, _block_id, target_pid}} -> Map.update(acc, target_pid, 1, &(&1 + 1))
+          _ -> acc
+        end
+      end)
+
+    # remove dead worker and update blocks_count for workers that received blocks
+    new_workers =
       state.workers
       |> Enum.reject(fn {_hostname, info} -> info.pid == worker_pid end)
+      |> Enum.map(fn {hostname, info} ->
+        added_count = Map.get(worker_block_counts, info.pid, 0)
+        {hostname, %{info | blocks_count: info.blocks_count + added_count}}
+      end)
       |> Map.new()
-      
+
     if map_size(new_workers) < map_size(state.workers) do
       Logger.info("Removed worker #{inspect(worker_pid)} from workers list.")
     else
       Logger.warning("Worker #{inspect(worker_pid)} not found in workers list during DOWN handling.")
     end
 
-    new_worker_to_block_mapping = Map.delete(state.worker_to_block_mapping, worker_pid)
+    # Update worker_to_block_mapping: remove dead worker, add blocks to targets
+    new_worker_to_block_mapping =
+      state.worker_to_block_mapping
+      |> Map.delete(worker_pid)
+      |> then(fn mapping ->
+        Enum.reduce(replication_results, mapping, fn result, acc ->
+          case result do
+            {:ok, {:ok, block_id, target_pid}} ->
+              Map.update(acc, target_pid, %{block_id => true}, &Map.put(&1, block_id, true))
+            _ -> acc
+          end
+        end)
+      end)
 
     new_tree = rebuild_tree(new_workers)
 
