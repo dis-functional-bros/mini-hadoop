@@ -39,8 +39,6 @@ defmodule MiniHadoop.Job.JobRunner do
       {:ok, worker_runner_map, load_tree} ->
         state = %__MODULE__{
           job: job,
-          map_tasks: [],
-          reduce_tasks: [],
           participating_blocks: [],
           shuffle_data: [],
           worker_process_map: worker_runner_map,
@@ -48,8 +46,6 @@ defmodule MiniHadoop.Job.JobRunner do
           started_at: DateTime.utc_now(),
           total_map_tasks: 0,
           total_reduce_tasks: 0,
-          map_tasks: [],
-          reduce_tasks: [],
           job_spawned_task_counter_ref: job_spawned_task_counter_ref,
           result_path: job.output_dir || result_path
         }
@@ -177,6 +173,22 @@ defmodule MiniHadoop.Job.JobRunner do
     {:stop, :normal, final_state}
   end
 
+  def handle_info({:job_failed, error}, state) do
+    Logger.error("Job #{state.job.id} failed: #{inspect(error)}")
+    final_state = notify_job_failure(state, error)
+    {:stop, :normal, final_state}
+  end
+
+  def handle_info({:DOWN, _ref, :process, dead_worker_pid, reason}, state) do
+    Logger.error("Worker died: #{inspect(dead_worker_pid)}, reason: #{reason}")
+    {:noreply, state}
+  end
+
+  def handle_info(msg, state) do
+    Logger.info("JobRunner #{inspect(self())} received ANY message: #{inspect(msg)}")
+    {:noreply, state}
+  end
+
   defp create_stream(state) do
     state
     |> fetch_all_reduce_results()
@@ -234,45 +246,9 @@ defmodule MiniHadoop.Job.JobRunner do
   defp sort_entries(entries, _), do: Enum.sort_by(entries, &{-elem(&1, 1), elem(&1, 0)})
 
 
-  def handle_info({:job_failed, error}, state) do
-    Logger.error("Job #{state.job.id} failed: #{inspect(error)}")
-    final_state = notify_job_failure(state, error)
-    {:stop, :normal, final_state}
-  end
-
-  def handle_info({:DOWN, _ref, :process, dead_worker_pid, reason}, state) do
-    Logger.error("Worker died: #{inspect(dead_worker_pid)}, reason: #{reason}")
-    {:noreply, state}
-  end
-
-  defp fetch_all_reduce_results(state) do
-    storage_pids = Map.values(state.worker_process_map)
-                   |> Enum.map(fn {storage_pid, _runner_pid} -> storage_pid end)
-
-    storage_pids
-    |> Task.async_stream(
-      fn storage_pid ->
-        case GenServer.call(storage_pid, :get_reduce_results, 10_000) do
-          {:ok, results} when is_list(results) ->
-            Enum.map(results, fn {k, v} -> {k, v} end)
-          _ ->
-            []
-        end
-      end,
-      max_concurrency: length(storage_pids),
-      timeout: 15_000
-    )
-    |> Enum.flat_map(fn
-      {:ok, results} -> results
-      _ -> []
-    end)
-  end
 
 
-  def handle_info(msg, state) do
-    Logger.info("JobRunner #{inspect(self())} received ANY message: #{inspect(msg)}")
-    {:noreply, state}
-  end
+
 
   # Phase execution with higher-order functions
   defp execute_map_phase(state) do
@@ -460,10 +436,10 @@ defmodule MiniHadoop.Job.JobRunner do
         # Ensure the last range goes to :last
         ranges =
           case List.last(ranges) do
-            {start_key, _, pid} ->
-              List.replace_at(ranges, -1, {start_key, :last, pid})
             {:first, _, pid} ->
               List.replace_at(ranges, -1, {:first, :last, pid})
+            {start_key, _, pid} ->
+              List.replace_at(ranges, -1, {start_key, :last, pid})
           end
 
         ranges
@@ -675,16 +651,15 @@ defmodule MiniHadoop.Job.JobRunner do
     end)
   end
 
-
   defp dispatch_tasks([], acc), do: acc
   defp dispatch_tasks([task | remaining_tasks], {dispatched, failed, {worker_process_map, load_balance_runner_tree}}) do
     case execute_task(task, worker_process_map, load_balance_runner_tree) do
-      {:ok, new_tree} ->
-        dispatch_tasks(remaining_tasks, {dispatched + 1, failed, {worker_process_map, new_tree}})
       {:ok, :all_workers_overloaded} ->
         # All workers are overloaded, retrying dispatch
         :timer.sleep(1000) # Small delay
         dispatch_tasks([task | remaining_tasks], {dispatched, failed, {worker_process_map, load_balance_runner_tree}})
+      {:ok, new_tree} ->
+        dispatch_tasks(remaining_tasks, {dispatched + 1, failed, {worker_process_map, new_tree}})
       {:error, _reason} ->
         dispatch_tasks(remaining_tasks, {dispatched, failed + 1, {worker_process_map, load_balance_runner_tree}})
     end

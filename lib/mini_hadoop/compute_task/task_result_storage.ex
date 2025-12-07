@@ -110,32 +110,6 @@ defmodule MiniHadoop.ComputeTask.TaskResultStorage do
     end
   end
 
-  defp update_samples(existing_samples, new_keys, sample_rate) do
-    # Limit: Don't let samples grow beyond reasonable size
-    max_samples = 1000  # Maximum samples to keep
-
-    current_size = MapSet.size(existing_samples)
-
-    if current_size >= max_samples do
-      # Already at max - don't add more
-      existing_samples
-    else
-      # Calculate how many more we can add
-      remaining_capacity = max_samples - current_size
-
-      # Sample new keys with probability, but respect capacity limit
-      Enum.reduce(new_keys, {existing_samples, remaining_capacity},
-        fn key, {samples, remaining} ->
-          if remaining > 0 and :rand.uniform() <= sample_rate do
-            {MapSet.put(samples, key), remaining - 1}
-          else
-            {samples, remaining}
-          end
-        end)
-      |> elem(0)
-    end
-  end
-
   @impl true
   def handle_call(:get_sample_keys, _from, state) do
     # Convert MapSet to sorted list for response
@@ -147,18 +121,6 @@ defmodule MiniHadoop.ComputeTask.TaskResultStorage do
 
     {:reply, {:ok, samples}, state}
   end
-
-  # @impl true
-  # def handle_call(:get_all_keys, _from, state) do
-  #   # Get all keys from ETS (already sorted)
-  #   keys = :ets.match(state.keys_ets_ref, {'$1'}) |> List.flatten()
-  #   {:reply, {:ok, keys}, state}
-  # end
-
-  # @impl true
-  # def handle_call(:get_key_count, _from, state) do
-  #   {:reply, {:ok, state.key_count}, state}
-  # end
 
   @impl true
   def handle_call({:get_data_in_range, range_start, range_end}, _from, state) do
@@ -211,6 +173,31 @@ defmodule MiniHadoop.ComputeTask.TaskResultStorage do
     {:stop, :normal, :ok, state}
   end
 
+  defp update_samples(existing_samples, new_keys, sample_rate) do
+    # Limit: Don't let samples grow beyond reasonable size
+    max_samples = 1000  # Maximum samples to keep
+
+    current_size = MapSet.size(existing_samples)
+
+    if current_size >= max_samples do
+      # Already at max - don't add more
+      existing_samples
+    else
+      # Calculate how many more we can add
+      remaining_capacity = max_samples - current_size
+
+      # Sample new keys with probability, but respect capacity limit
+      Enum.reduce(new_keys, {existing_samples, remaining_capacity},
+        fn key, {samples, remaining} ->
+          if remaining > 0 and :rand.uniform() <= sample_rate do
+            {MapSet.put(samples, key), remaining - 1}
+          else
+            {samples, remaining}
+          end
+        end)
+      |> elem(0)
+    end
+  end
 
   defp get_keys_in_range_from_ets(ets_ref, range_start, range_end) do
     match_spec =
