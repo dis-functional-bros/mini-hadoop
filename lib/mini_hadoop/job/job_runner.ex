@@ -666,7 +666,7 @@ defmodule MiniHadoop.Job.JobRunner do
       timeout: 15_000
     )
     |> Enum.flat_map(fn
-      {:ok, results} -> results  # Now 'results' is just a list, not {:ok, list}
+      {:ok, results} -> results
       _ -> []
     end)
   end
@@ -757,7 +757,6 @@ defmodule MiniHadoop.Job.JobRunner do
     {:error, "Invalid task structure"}
   end
 
-  # Keep your existing helper functions
   defp get_runner_from_tree(tree, target_runner_pid) do
     iterator = :gb_trees.iterator(tree)
     find_runner_in_iterator(iterator, target_runner_pid)

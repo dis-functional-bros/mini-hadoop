@@ -45,8 +45,8 @@ defmodule MiniHadoop.Master.ComputeOperation do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  def init(_opts) do
-
+  @impl true
+  def init(opts) do
     state = %__MODULE__{
       job_specs: %{},
       job_executions: %{},
@@ -65,7 +65,7 @@ defmodule MiniHadoop.Master.ComputeOperation do
     {:ok, state}
   end
 
-  # Public API
+  # Public API (Wrappers)
   def submit_job(job_attrs) do
     GenServer.call(__MODULE__, {:submit_job, job_attrs})
   end
@@ -95,16 +95,18 @@ defmodule MiniHadoop.Master.ComputeOperation do
   end
 
   # GenServer Handlers
+  @impl true
   def handle_call({:register_worker, worker_pid}, _from, state) do
     {:reply, :ok, %{state | workers: [worker_pid | state.workers]}}
   end
 
+  @impl true
   def handle_call(:get_workers, _from, state) do
     {:reply, state.workers, state}
   end
 
+  @impl true
   def handle_call({:submit_job, job_spec}, _from, state) do
-
     unless is_struct(job_spec, MiniHadoop.Models.JobSpec) do
       {:reply, {:error, :invalid_job_spec}, state}
     end
@@ -112,7 +114,6 @@ defmodule MiniHadoop.Master.ComputeOperation do
     if :queue.len(state.pending_jobs) > @max_queue_size_of_jobs do
       {:reply, {:error, :queue_full}, state}
     else
-
       job_execution = JobExecution.new(job_spec.id)
 
       state = %{
@@ -132,6 +133,7 @@ defmodule MiniHadoop.Master.ComputeOperation do
     end
   end
 
+  @impl true
   def handle_call({:get_job_status, job_id}, _from, state) do
     case state.job_executions[job_id] do
       nil ->
@@ -142,16 +144,19 @@ defmodule MiniHadoop.Master.ComputeOperation do
     end
   end
 
+  @impl true
   def handle_call(:list_running_jobs, _from, state) do
     running_jobs = Map.keys(state.running_jobs)
     {:reply, running_jobs, state}
   end
 
+  @impl true
   def handle_call(:list_pending_jobs, _from, state) do
     pending_jobs = :queue.to_list(state.pending_jobs)
     {:reply, pending_jobs, state}
   end
 
+  @impl true
   def handle_call(:get_system_status, _from, state) do
     status = %{
       running_jobs: map_size(state.running_jobs),
@@ -165,8 +170,8 @@ defmodule MiniHadoop.Master.ComputeOperation do
   end
 
   # Async update dari Job Runner
+  @impl true
   def handle_cast({:job_started, job_id}, state) do
-
     state =
       update_in(state.job_executions[job_id], fn job_execution ->
         JobExecution.mark_started(job_execution, state.job_processes[job_id])
@@ -175,6 +180,7 @@ defmodule MiniHadoop.Master.ComputeOperation do
     {:noreply, state}
   end
 
+  @impl true
   def handle_cast({:job_status, job_id, status}, state) do
     state =
       update_in(state.job_executions[job_id], fn job_execution ->
@@ -184,17 +190,19 @@ defmodule MiniHadoop.Master.ComputeOperation do
     {:noreply, state}
   end
 
+  @impl true
   def handle_cast({:job_progress, job_id, phase, completed, total}, state) do
     state =
       update_in(state.job_executions[job_id], fn job_execution ->
         JobExecution.update_progress(job_execution, phase, completed, total)
       end)
 
-      Logger.info("Job #{job_id} #{phase} #{completed}/#{total}")
+    Logger.info("Job #{job_id} #{phase} #{completed}/#{total}")
 
     {:noreply, state}
   end
 
+  @impl true
   def handle_cast({:job_completed, job_id, results}, state) do
     state =
       update_in(state.job_executions[job_id], fn job_execution ->
@@ -217,6 +225,7 @@ defmodule MiniHadoop.Master.ComputeOperation do
     {:noreply, state}
   end
 
+  @impl true
   def handle_cast({:job_failed, job_id, reason}, state) do
     Logger.error("Job #{job_id} failed: #{inspect(reason)}")
 
@@ -242,8 +251,8 @@ defmodule MiniHadoop.Master.ComputeOperation do
   end
 
   # Handle unexpected process termination
+  @impl true
   def handle_info({:DOWN, _ref, :process, pid, reason}, state) do
-
     case Enum.find(state.job_processes, fn {_job_id, job_pid} -> job_pid == pid end) do
       {job_id, _pid} ->
         Logger.warning("Job #{job_id} process terminated unexpectedly: #{inspect(reason)}")
@@ -267,7 +276,6 @@ defmodule MiniHadoop.Master.ComputeOperation do
     end
   end
 
-  # Private functions
   defp start_pending_jobs(state) do
     if map_size(state.running_jobs) < @max_concurrent_jobs and
          not :queue.is_empty(state.pending_jobs) do
