@@ -115,13 +115,13 @@ defmodule MiniHadoop.Examples.WordCount do
     Map.update(acc, word, 1, &(&1 + 1))
   end
 
-  defp valid_word?(word) do
-    byte_size(word) >= 2 and contains_letter?(word)
-  end
-
   defp valid_word?("a"), do: true
   defp valid_word?("i"), do: true
   defp valid_word?(""), do: false
+
+  defp valid_word?(word) do
+    byte_size(word) >= 2 and contains_letter?(word)
+  end
 
   defp contains_letter?(word) do
     String.match?(word, ~r/\p{L}/u)

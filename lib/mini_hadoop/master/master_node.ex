@@ -247,28 +247,155 @@ defmodule MiniHadoop.Master.MasterNode do
     {:reply, state, state}
   end
 
-  # Complete implementation for re-replication of blocks
+  # implementation for re-replication of blocks
   @impl true
-  def handle_call({:DOWN, worker_pid, _, _, _}, _from, state) do
-    # TODO: complete implementation of re-replication of blocks
-    _block_ids = Map.get(state.worker_to_block_mapping, worker_pid, [])
+  def handle_info({:DOWN, _ref, :process, worker_pid, _reason}, state) do
 
-    # 1. Get other worker that has the block
-    # 2. Pick a new worker where the block will be replicated
-    # 3. Make a function call from the other worker to send the replicated block
+    Logger.warning("Worker #{inspect(worker_pid)} went down, starting re-replication process")
 
-    # Update worker mapping
-    # new_worker_mapping = Map.put(state.worker_to_block_mapping, new_worker_state.hostname, block_ids)
+    # Get all blocks that were stored on the failed worker
+    block_ids = Map.get(state.worker_to_block_mapping, worker_pid, %{}) |> Map.keys()
 
-    # Update block mapping
-    #new_block_mapping = Map.put(state.block_to_worker_mapping, block_ids, new_worker_state.hostname)
+    # for every under-replicated block
+    replication_results =
+      Task.async_stream(block_ids, fn block_id ->
+        # Get current workers that have this block (excluding the dead one)
+        current_replicas = Map.get(state.block_to_worker_mapping, block_id, [])
+                          |> List.delete(worker_pid)
 
-    # Delete worker from mapping
-    # new_workers = Map.delete(state.workers, worker_pid)
+        cond do
+          # No replicas left
+          length(current_replicas) == 0 ->
+            Logger.error("Block #{block_id} has NO remaining replicas - DATA LOST")
+            {:error, :no_replicas, block_id}
 
-    # Tree should be rebuilt by the update tree logic
-    # {:reply, :ok, %{state | workers: new_workers, tree: new_tree}}
-    {:reply, :ok, state}
+          # Still have replicas
+          true ->
+            # Exclude current replicas AND the dead worker from being selected as target
+            exclusion_list = [worker_pid | current_replicas]
+            
+            case find_smallest_excluding(state.tree, exclusion_list) do
+              {:ok, {_count, target_worker_pid}, _hostname} ->
+
+                source_worker_pid = hd(current_replicas)
+
+                case replicate_block_between_workers(source_worker_pid, target_worker_pid, block_id) do
+                  :ok ->
+                    {:ok, block_id, target_worker_pid}
+                  {:error, reason} ->
+                    Logger.error("Failed to re-replicate block #{block_id}: #{inspect(reason)}")
+                    {:error, reason, block_id}
+                end
+
+              :not_found ->
+                Logger.warning("No available worker to re-replicate block #{block_id}")
+                {:error, :no_target_worker, block_id}
+            end
+        end
+      end,
+      max_concurrency: 5,
+      timeout: 30_000
+      )
+      |> Enum.to_list()
+
+    # Update block_to_worker_mapping
+    new_block_to_worker_mapping =
+      Enum.reduce(replication_results, state.block_to_worker_mapping, fn result, acc ->
+        case result do
+          {:ok, {:ok, block_id, new_worker_pid}} ->
+            Map.update(acc, block_id, [new_worker_pid], fn existing ->
+              existing
+              |> List.delete(worker_pid)
+              |> Kernel.++([new_worker_pid])
+              |> Enum.uniq()
+            end)
+
+          {:ok, {:error, _reason, block_id}} ->
+            Map.update(acc, block_id, [], fn existing ->
+              List.delete(existing, worker_pid)
+            end)
+
+          _ ->
+            acc
+        end
+      end)
+      |> Enum.reject(fn {_block_id, workers} -> workers == [] end)
+      |> Map.new()
+
+    # Build map of how many blocks each worker received: %{worker_pid => count}
+    worker_block_counts =
+      Enum.reduce(replication_results, %{}, fn result, acc ->
+        case result do
+          {:ok, {:ok, _block_id, target_pid}} -> Map.update(acc, target_pid, 1, &(&1 + 1))
+          _ -> acc
+        end
+      end)
+
+    # remove dead worker and update blocks_count for workers that received blocks
+    new_workers =
+      state.workers
+      |> Enum.reject(fn {_hostname, info} -> info.pid == worker_pid end)
+      |> Enum.map(fn {hostname, info} ->
+        added_count = Map.get(worker_block_counts, info.pid, 0)
+        {hostname, %{info | blocks_count: info.blocks_count + added_count}}
+      end)
+      |> Map.new()
+
+    if map_size(new_workers) < map_size(state.workers) do
+      Logger.info("Removed worker #{inspect(worker_pid)} from workers list.")
+    else
+      Logger.warning("Worker #{inspect(worker_pid)} not found in workers list during DOWN handling.")
+    end
+
+    # Update worker_to_block_mapping: remove dead worker, add blocks to targets
+    new_worker_to_block_mapping =
+      state.worker_to_block_mapping
+      |> Map.delete(worker_pid)
+      |> then(fn mapping ->
+        Enum.reduce(replication_results, mapping, fn result, acc ->
+          case result do
+            {:ok, {:ok, block_id, target_pid}} ->
+              Map.update(acc, target_pid, %{block_id => true}, &Map.put(&1, block_id, true))
+            _ -> acc
+          end
+        end)
+      end)
+
+    new_tree = rebuild_tree(new_workers)
+
+    new_state = %{state |
+      workers: new_workers,
+      worker_to_block_mapping: new_worker_to_block_mapping,
+      block_to_worker_mapping: new_block_to_worker_mapping,
+      tree: new_tree
+    }
+
+    {:noreply, new_state}
+  end
+
+  # Helper function to replicate a block from source worker to target worker
+  defp replicate_block_between_workers(source_pid, target_pid, block_id) do
+    try do
+      case GenServer.call(source_pid, {:retrieve_block, block_id}, 30_000) do
+        {:ok, block_data} ->
+          case GenServer.call(target_pid, {:store_block, block_id, block_data}, 30_000) do
+            {:store, _worker_state} ->
+              :ok
+            other ->
+              {:error, {:unexpected_store_response, other}}
+          end
+
+        {:error, reason} ->
+          {:error, {:retrieve_failed, reason}}
+
+        other ->
+          {:error, {:unexpected_retrieve_response, other}}
+      end
+    rescue
+      error -> {:error, {:exception, error}}
+    catch
+      kind, reason -> {:error, {kind, reason}}
+    end
   end
 
   # ========== HANDLE_CAST FUNCTIONS (GROUPED) ==========

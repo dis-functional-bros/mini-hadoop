@@ -46,7 +46,7 @@ defmodule MiniHadoop.Master.ComputeOperation do
   end
 
   @impl true
-  def init(opts) do
+  def init(_opts) do
     state = %__MODULE__{
       job_specs: %{},
       job_executions: %{},

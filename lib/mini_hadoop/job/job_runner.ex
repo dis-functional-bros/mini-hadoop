@@ -44,8 +44,6 @@ defmodule MiniHadoop.Job.JobRunner do
       {:ok, worker_runner_map, load_tree} ->
         state = %__MODULE__{
           job: job,
-          map_tasks: [],
-          reduce_tasks: [],
           participating_blocks: [],
           shuffle_data: [],
           worker_process_map: worker_runner_map,
@@ -53,8 +51,6 @@ defmodule MiniHadoop.Job.JobRunner do
           started_at: DateTime.utc_now(),
           total_map_tasks: 0,
           total_reduce_tasks: 0,
-          map_tasks: [],
-          reduce_tasks: [],
           job_spawned_task_counter_ref: job_spawned_task_counter_ref,
           result_path: job.output_dir || result_path
         }
