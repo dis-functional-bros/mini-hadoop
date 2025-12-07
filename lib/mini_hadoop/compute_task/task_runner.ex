@@ -49,18 +49,21 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
   end
 
    # When: Task completes successfully
+   @impl true
    def handle_info({task_ref, {:success, ref, task}}, state) when is_reference(task_ref) do
      :ets.delete(state.task_refs_table, ref)
      {:noreply, handle_task_completion(state, task)}
    end
 
    # When: Expected task failure
+   @impl true
    def handle_info({task_ref, {:error, ref, task}}, state) when is_reference(task_ref) do
      :ets.delete(state.task_refs_table, ref)
      {:noreply, handle_task_failure(state, task.id, task.error)}
    end
 
    # When: Normal process shutdown for completed tasks (cleanup)
+   @impl true
    def handle_info({:DOWN, ref, :process, _pid, :normal}, state) do
      case :ets.lookup(state.task_refs_table, ref) do
        [{^ref, _task_id}] ->
@@ -74,6 +77,7 @@ defmodule MiniHadoop.ComputeTask.TaskRunner do
    end
 
    # When: Unexpected process shutdown
+   @impl true
    def handle_info({:DOWN, ref, :process, _pid, reason}, state) when is_reference(ref) do
      case :ets.lookup(state.task_refs_table, ref) do
        [{^ref, task_id}] ->

@@ -1,4 +1,3 @@
-# lib/mini_hadoop/job/job_supervisor.ex
 defmodule MiniHadoop.Job.JobSupervisor do
   @moduledoc """
   Interface for dynamically starting and managing job processes.

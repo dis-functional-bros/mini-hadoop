@@ -1,5 +1,5 @@
 defmodule MiniHadoop.Master.FileOperation do
-use GenServer
+  use GenServer
   require Logger
   alias MiniHadoop.Models.FileTask
   alias MiniHadoop.Models.Block
@@ -32,22 +32,24 @@ use GenServer
     GenServer.call(__MODULE__, {:get_operation_info, task_id}, @default_timeout)
   end
 
+  @impl true
   def init(_) do
     retrieve_result_path = Application.get_env(:mini_hadoop, :retrieve_result_path)
     {:ok, %{operations: %{}, next_id: 1, retrieve_result_path: retrieve_result_path}}
   end
 
+  @impl true
   def handle_cast({:update_operation, operation_id, operation_new_state}, state) do
     new_state = %{state | operations: Map.put(state.operations, operation_id, operation_new_state)}
     {:noreply, new_state}
   end
 
+  @impl true
   def handle_call({:get_operation_info, operation_id}, _from, state) do
     {:reply, Map.get(state.operations, operation_id), state}
   end
 
-  # ---------------------
-  # GenServer Callbacks
+  @impl true
   def handle_call({:submit_store, filename, file_path}, _from, state) do
     cond do
       !File.exists?(file_path) ->
@@ -59,6 +61,7 @@ use GenServer
     end
   end
 
+  @impl true
   def handle_call({:submit_retrieve, filename}, _from, state) do
     cond do
       filename == "" ->
@@ -70,6 +73,7 @@ use GenServer
     end
   end
 
+  @impl true
   def handle_call({:submit_delete, filename}, _from, state) do
     cond do
       filename == "" ->

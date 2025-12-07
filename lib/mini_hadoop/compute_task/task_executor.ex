@@ -282,7 +282,6 @@ defmodule MiniHadoop.ComputeTask.TaskExecutor do
           end)
           Map.put(acc, key, values)
         end)
-
         {:ok, result_map}
     end
   end
