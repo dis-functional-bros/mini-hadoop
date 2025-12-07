@@ -462,8 +462,9 @@ Di dalam Interactive Shell MasterNode kita dapat mengakses beberapa API yang tel
 1. Menyimpan file ke dalam DFS
 
 ```elixir
-# old
 MiniHadoop.store_file("<nama_file_dalam_DFS>", "<path/ke/file>")
+# contoh : MiniHadoop.store_file("ps", "test.txt")
+# file akan disimpan dengan nama "ps"
 ```
 
 Disclaimer, pastikan master node memiliki akses ke path file yang ingin disimpan.
@@ -472,6 +473,7 @@ Disclaimer, pastikan master node memiliki akses ke path file yang ingin disimpan
 
 ```elixir
 MiniHadoop.retrieve_file("<nama_file_dalam_DFS>")
+# contoh : MiniHadoop.retrieve_file("ps")
 ```
 
 File akan disimpan di direktori ./retrieve_files proyek
@@ -480,6 +482,7 @@ File akan disimpan di direktori ./retrieve_files proyek
 
 ```elixir
 MiniHadoop.delete_file("<nama_file_dalam_DFS>")
+# contoh : MiniHadoop.delete_file("ps")
 ```
 
 File akan dihapus dari DFS
@@ -488,6 +491,7 @@ File akan dihapus dari DFS
 
 ```elixir
 MiniHadoop.file_op_info("id_operasi_file")
+# contoh : MiniHadoop.file_op_info("store_1")
 ```
 
 ### MapReduce Job
@@ -508,7 +512,7 @@ Hasil MapReduce Job akan disimpan di direktori ./job_result proyek
 
 nilai map_module dan reduce_module merupakan module yang mengimplementasikan behaviour MiniHadoop.Map.MapBehaviour dan MiniHadoop.Reduce.ReduceBehaviour
 
-Anda dapat membuat implementasi costum untuk Map dan Reduce dengan membuat module baru yang mengimplementasikan behaviour MiniHadoop.Map.MapBehaviour dan MiniHadoop.Reduce.ReduceBehaviour.
+Anda dapat membuat implementasi custom untuk Map dan Reduce dengan membuat module baru yang mengimplementasikan behaviour MiniHadoop.Map.MapBehaviour dan MiniHadoop.Reduce.ReduceBehaviour.
 
 ```elixir
 defmodule MiniHadoop.Map.Examples.CostumMap do

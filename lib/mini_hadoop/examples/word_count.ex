@@ -37,7 +37,7 @@ defmodule MiniHadoop.Examples.WordCount do
         {_, pos, total} when pos >= total ->
           {:halt, nil}
 
-        {text, pos, total} = state ->
+        {text, pos, total} = _state ->
           case next_word(text, pos, total) do
             {:word, word, new_pos} ->
               {[word], {text, new_pos, total}}
@@ -109,107 +109,6 @@ defmodule MiniHadoop.Examples.WordCount do
     char == ?' or char == ?- or char == ?_ or
     # Unicode letter categories
     Regex.match?(@valid_word_chars, <<char::utf8>>)
-  end
-
-  @doc """
-  Alternative: Stream line by line, then words within each line.
-  Useful for text with clear line boundaries (logs, CSV, etc.)
-  """
-  def stream_lines_then_words(text) when is_binary(text) do
-    Stream.resource(
-      fn -> {text, 0} end,
-
-      fn
-        {text, pos} when pos >= byte_size(text) ->
-          {:halt, nil}
-
-        {text, pos} ->
-          case next_line(text, pos) do
-            {:line, line, new_pos} ->
-              # Process words in this line
-              words = extract_words_from_line(line)
-              {words, {text, new_pos}}
-            :no_line ->
-              {:halt, nil}
-          end
-      end,
-
-      fn _ -> :ok end
-    )
-    |> Stream.flat_map(& &1)  # Flatten list of word lists
-    |> Stream.filter(&valid_word?/1)
-  end
-
-  defp next_line(text, pos) do
-    case :binary.match(text, "\n", [{:scope, {pos, byte_size(text) - pos}}]) do
-      {line_end, _} ->
-        line = binary_part(text, pos, line_end - pos)
-        {:line, line, line_end + 1}
-      :nomatch ->
-        # Last line (no trailing newline)
-        if pos < byte_size(text) do
-          line = binary_part(text, pos, byte_size(text) - pos)
-          {:line, line, byte_size(text)}
-        else
-          :no_line
-        end
-    end
-  end
-
-  # Extract words from a single line (can be optimized)
-  defp extract_words_from_line(line) do
-    line
-    |> String.downcase()
-    |> String.split(@word_boundary, trim: true)
-  end
-
-  @doc """
-  Chunk-based streaming with overlap for word boundaries.
-  Processes text in fixed-size chunks but ensures words aren't split
-  at chunk boundaries by overlapping chunks.
-  """
-  def stream_chunks_with_overlap(text, chunk_size \\ 65_536) do
-    Stream.resource(
-      fn -> {text, 0, byte_size(text)} end,
-
-      fn
-        {_, pos, total} when pos >= total ->
-          {:halt, nil}
-
-        {text, pos, total} ->
-          # Read chunk with extra room
-          chunk_end = min(pos + chunk_size + 100, total)
-          chunk = binary_part(text, pos, chunk_end - pos)
-
-          # Find end of last full word in chunk
-          actual_chunk_end =
-            if chunk_end < total do
-              find_last_word_boundary(chunk) + pos
-            else
-              chunk_end
-            end
-
-          # Extract actual chunk
-          actual_chunk = binary_part(text, pos, actual_chunk_end - pos)
-
-          # Extract words from chunk
-          words = extract_words_from_line(actual_chunk)
-
-          {words, {text, actual_chunk_end, total}}
-      end,
-
-      fn _ -> :ok end
-    )
-    |> Stream.flat_map(& &1)
-    |> Stream.filter(&valid_word?/1)
-  end
-
-  # Find the last word boundary in a chunk
-  defp find_last_word_boundary(chunk) do
-    case :binary.match(chunk, ~r/[^\p{L}\p{Nd}_'-]+/u, [{:scope, {max(0, byte_size(chunk) - 100), 100}}]) do
-      {pos, length} -> pos + length
-      :nomatch -> byte_size(chunk)
-    end
   end
 
   # Helper functions
