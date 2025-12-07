@@ -31,7 +31,6 @@ lorem.txt
 med.txt
 test.txt
 *.py
-*.tsv
+
 
 job_results
-shared
