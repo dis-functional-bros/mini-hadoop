@@ -1,4 +1,3 @@
-# lib/mini_hadoop/compute_task/runner_and_storage_supervisor.ex
 defmodule MiniHadoop.ComputeTask.RunnerAndStorageSupervisor do
   @moduledoc """
   Interface for dynamically starting and managing task processes on worker nodes.
