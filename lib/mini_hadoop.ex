@@ -83,7 +83,7 @@ defmodule MiniHadoop do
   end
 
   def cluster_info do
-    _datanodes = GenServer.call(MiniHadoop.Master.MasterNode, :list_worker)
+    datanodes = GenServer.call(MiniHadoop.Master.MasterNode, :list_worker)
     master_state = GenServer.call(MiniHadoop.Master.MasterNode, :get_state)
 
     # Get application start time and calculate uptime
