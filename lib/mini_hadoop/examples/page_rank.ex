@@ -45,11 +45,6 @@ defmodule MiniHadoop.Examples.PageRank do
       # Calculate baseline contribution
       baseline = (1 - d) / n
 
-      # Track unique page IDs for logging
-      unique_page_ids = MapSet.new()
-      source_count = 0
-      target_count = 0
-
       # Process data line by line lazily
       contributions =
         data
@@ -57,11 +52,6 @@ defmodule MiniHadoop.Examples.PageRank do
         |> Stream.flat_map(fn line ->
           case parse_line(line) do
             {:ok, source, targets} ->
-              # Track unique page IDs
-              current_unique = MapSet.new([source | targets])
-              source_count = if targets != [], do: source_count + 1, else: source_count
-              target_count = target_count + length(targets)
-
               # Get source rank (default to 1.0 if not found)
               rank = Map.get(page_ranks, source, @default_initial_rank)
 
@@ -109,7 +99,7 @@ defmodule MiniHadoop.Examples.PageRank do
 
   Note: Mapper already includes (1-d)/n, so reducer just sums contributions.
   """
-  def pagerank_reducer(data, context) when is_map(data) do
+  def pagerank_reducer(data, _context) when is_map(data) do
     try do
       # Calculate new ranks by summing contributions
       results =

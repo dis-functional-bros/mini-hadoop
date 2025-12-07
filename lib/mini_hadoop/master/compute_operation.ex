@@ -4,11 +4,10 @@ defmodule MiniHadoop.Master.ComputeOperation do
   require Logger
 
   alias MiniHadoop.Job.JobSupervisor
-  alias MiniHadoop.Models.JobSpec
   alias MiniHadoop.Models.JobExecution
 
-  @max_concurrent_jobs Application.get_env(:mini_hadoop, :max_concurrent_jobs, 1)
-  @max_queue_size_of_jobs Application.get_env(:mini_hadoop, :max_queue_size_of_jobs, 10)
+  @max_concurrent_jobs Application.compile_env(:mini_hadoop, :max_concurrent_jobs, 1)
+  @max_queue_size_of_jobs Application.compile_env(:mini_hadoop, :max_queue_size_of_jobs, 10)
 
   defstruct [
     # Job Specifications (immutable definitions)

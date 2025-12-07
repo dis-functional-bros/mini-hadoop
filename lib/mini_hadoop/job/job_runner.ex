@@ -119,6 +119,7 @@ defmodule MiniHadoop.Job.JobRunner do
   end
 
   # Message handlers using higher-order functions
+  @impl true
   def handle_cast({:task_completed, task_id}, state) do
     task_handler = if String.starts_with?(task_id, "red_") do
       &handle_reduce_task_completed/1
@@ -129,7 +130,7 @@ defmodule MiniHadoop.Job.JobRunner do
     {:noreply, task_handler.(state)}
   end
 
-  def handle_cast({:task_failed, task_id, error}, state) do
+  def handle_cast({:task_failed, task_id, _error}, state) do
 
     task_handler = if String.starts_with?(task_id, "red_") do
       &handle_reduce_task_failed/1
@@ -140,6 +141,7 @@ defmodule MiniHadoop.Job.JobRunner do
     {:noreply, task_handler.(state)}
   end
 
+  @impl true
   def handle_info(:start_processing, state) do
     Logger.info("Starting job processing")
     new_state = state
@@ -387,7 +389,7 @@ defmodule MiniHadoop.Job.JobRunner do
   end
 
   defp block_list_formatter(state) do
-    chunk_size = Map.size(state.worker_process_map)* 5
+    chunk_size = map_size(state.worker_process_map) * 5
     state.participating_blocks |> Enum.chunk_every(chunk_size)
   end
 
@@ -412,7 +414,7 @@ defmodule MiniHadoop.Job.JobRunner do
     end
 
     # Chunk ranges for parallel processing
-    chunk_size = Map.size(state.worker_process_map) * 5
+    chunk_size = map_size(state.worker_process_map) * 5
 
     Logger.debug("Created #{actual_ranges} ranges, chunking by #{chunk_size}")
 
@@ -564,14 +566,14 @@ defmodule MiniHadoop.Job.JobRunner do
       case GenServer.call(worker_pid, {:start_runner_and_storage, job_id, job_runner_pid}, 5000) do
         {:ok, result} -> {:ok, result}
         {:error, reason} -> {:error, reason}
-        other -> {:error, :unexpected_response}
+        _other -> {:error, :unexpected_response}
       end
     rescue
-      error -> {:error, :communication_failed}
+      _error -> {:error, :communication_failed}
     end
   end
 
-  defp process_async_results(results, total_workers) do
+  defp process_async_results(results, _total_workers) do
     {worker_runner_map, load_tree, failures} =
       Enum.reduce(results, {%{}, :gb_trees.empty(), []}, fn
         {:ok, {worker_pid, storage_pid, task_runner_pid}}, {worker_acc, tree_acc, failure_acc} ->
@@ -746,7 +748,7 @@ defmodule MiniHadoop.Job.JobRunner do
       true ->
         {:error, :no_more_workers}
       false ->
-        {{current_count, runner_pid}, _value, new_remaining_tree} = :gb_trees.take_smallest(remaining_tree)
+        {{_current_count, runner_pid}, _value, new_remaining_tree} = :gb_trees.take_smallest(remaining_tree)
         {:ok, runner_pid, new_remaining_tree}
     end
   end

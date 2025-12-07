@@ -63,18 +63,4 @@ defmodule MiniHadoop.Application do
       ]},
     ]
   end
-
-  # Optional: Add environment-specific startup logic
-  defp environment_specific_setup do
-    case Mix.env() do
-      :dev ->
-        Logger.info("Development mode")
-
-      :test ->
-        Logger.info("Test mode")
-
-      :prod ->
-        Logger.info("Production mode")
-    end
-  end
 end
