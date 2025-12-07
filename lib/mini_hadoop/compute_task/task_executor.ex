@@ -282,18 +282,7 @@ defmodule MiniHadoop.ComputeTask.TaskExecutor do
           end)
           Map.put(acc, key, values)
         end)
-
         {:ok, result_map}
     end
-  end
-
-  # Helper for debugging memory
-  if Mix.env() == :dev do
-    defp log_memory(stage) do
-      memory = :erlang.memory(:total)
-      Logger.debug("Memory at #{stage}: #{div(memory, 1024)}KB")
-    end
-  else
-    defp log_memory(_), do: :ok
   end
 end

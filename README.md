@@ -1,20 +1,21 @@
 # MiniHadoop
 
-Sebuah Distributed File System (DFS) yang terinspirasi dari Hadoop, dikembangkan menggunakan Elixir sebagai bagian dari tugas mini project mata kuliah *Pemrograman Fungsional 25/26*.
+Sebuah Distributed File System (DFS) yang terinspirasi dari Hadoop, dikembangkan menggunakan Elixir sebagai bagian dari tugas mini project mata kuliah _Pemrograman Fungsional 25/26_.
 
 ## 🎯 Fitur Utama
 
 - **Distributed Storage**: Berkas (file) dipecah menjadi blok dan didistribusikan ke beberapa DataNode.
-- **Data Replication**: Setiap blok direplikasi ke sejumlah node untuk meningkatkan *fault tolerance*.
+- **Data Replication**: Setiap blok direplikasi ke sejumlah node untuk meningkatkan _fault tolerance_.
 - **Fault Tolerance**: Sistem tetap dapat beroperasi meskipun terjadi kegagalan pada beberapa DataNode.
 - **MapReduce Framework**: Mendukung pemrosesan data terdistribusi menggunakan model MapReduce.
-- **Functional Programming**: Memanfaatkan prinsip pemrograman fungsional untuk meningkatkan reliabilitas dan *maintainability*.
+- **Functional Programming**: Memanfaatkan prinsip pemrograman fungsional untuk meningkatkan reliabilitas dan _maintainability_.
 
 ## 🏗️ Arsitektur Sistem
 
 ### Model Master–Slave
 
 - **NameNode (Master)**:
+
   - Mengelola metadata sistem berkas.
   - Melacak lokasi setiap blok yang tersimpan pada DataNode.
   - Mengoordinasikan operasi berkas dan tugas MapReduce.
@@ -22,15 +23,60 @@ Sebuah Distributed File System (DFS) yang terinspirasi dari Hadoop, dikembangkan
 - **DataNode + TaskTracker (Slave)**:
   - Menyimpan blok data pada penyimpanan lokal.
   - Menjalankan tugas MapReduce.
-  - Mengirimkan *heartbeat* ke NameNode sebagai indikator status node.
+  - Mengirimkan _heartbeat_ ke NameNode sebagai indikator status node.
 
 ### Komponen MapReduce
 
 - **JobTracker**: Mengelola pengajuan pekerjaan dan penjadwalan tugas.
-- **TaskTracker**: Mengeksekusi *map tasks* dan *reduce tasks*.
+- **TaskTracker**: Mengeksekusi _map tasks_ dan _reduce tasks_.
 - **Pluggable Processing**: Pengguna dapat mendefinisikan fungsi map dan reduce sendiri.
 
-## 🎓 Aspek Functional Programming 
+## 🧠 Wawasan Pengembangan & Tantangan Teknis
+
+### Kompleksitas Distribusi dan Manajemen State
+
+Sistem terdistribusi pada dasarnya adalah **90% side effects**. Salah satu pembelajaran penting adalah memisahkan **coordination logic** (yang penuh side effects) dari **pure execution**. Dalam MiniHadoop, fetching data menjadi bagian koordinasi, sementara task execution dirancang sebagai pure function yang mudah di-_reason_ dan dikelola.
+
+### Performa dan Optimasi Memory
+
+Desain parallel process yang baik dapat memberikan dampak signifikan—dalam pengembangan ini, perbaikan kode berkualitas berhasil mengurangi penggunaan memori hingga **14x lipat**. Hal ini menunjukkan pentingnya:
+
+- **Pemilihan struktur data yang tepat** daripada pendekatan "yang penting selesai"
+- **Pemahaman mendalam terhadap BEAM VM** (scheduler, task, garbage collector)
+- **Benchmark pada workload nyata**—microbenchmark bisa misleading dalam environment concurrent
+
+### Tantangan Load Balancing
+
+Implementasi awal menggunakan **round robin approach** untuk distribusi blok ternyata memiliki kelemahan. Pendekatan ini tidak mempertimbangkan load saat ini dari setiap node, sehingga tidak dapat bereaksi terhadap perubahan kondisi cluster. Ketika terjadi replikasi atau penghapusan blok yang tidak merata, distribusi menjadi tidak seimbang.
+
+### Edge Cases dalam Sistem Terdistribusi
+
+Sistem terdistribusi memiliki banyak edge cases yang harus ditangani, terutama dalam arsitektur master-slave:
+
+- **Slave failure**: Node yang menyimpan sebagian data menjadi unreachable
+- **Network issues**: Menyebabkan delay atau inkonsistensi operasi
+- **Master failure**: Saat ini belum ditangani dalam implementasi
+- **Data replication**: Diperlukan untuk mencegah data loss ketika node gagal
+
+### Keunggulan Elixir/OTP untuk Distributed Systems
+
+Elixir terbukti sangat powerful untuk menangani sistem terdistribusi karena:
+
+- **Inter-node communication** melalui message passing yang aman dan sederhana
+- **RPC calls** yang mudah untuk koordinasi antar server
+- **Process isolation** yang murah namun powerful—spawning ratusan ribu lightweight process
+- **Built-in fault tolerance** dengan supervision tree yang mengelola lifecycle process
+- **Pattern matching** untuk handling failure recovery secara otomatis
+- **Tail recursion optimization** oleh BEAM VM untuk efisiensi memori
+
+### Prinsip Arsitektur Functional
+
+- **State immutability**: State disimpan dalam GenServer/proses yang bertanggung jawab atas satu entitas logis
+- **Message passing**: Menggantikan mutasi variabel global dengan komunikasi antar proses
+- **Atomic operations**: Pattern matching pada RPC calls memberikan atomicity
+- **Separation of concerns**: Memisahkan pure function dari side effects untuk maintainability
+
+## 🎓 Aspek Functional Programming
 
 ### 1. **State Immutability** - Foundation for Predictable Distributed Systems
 
@@ -43,7 +89,7 @@ defp process_next_pending_task(state) do
       {task, new_state} when not is_nil(task) ->
         new_state
         |> execute_task_immediately(task)
-        |> process_next_pending_task()  
+        |> process_next_pending_task()
       {nil, new_state} ->
         new_state
     end
@@ -52,10 +98,12 @@ defp process_next_pending_task(state) do
   end
 end
 ```
+
 Setiap fungsi menerima snapshot state yang immutable:
-  - dequeue_task(state) → Mengembalikan {task, new_state} di mana new_state adalah VERSI BARU tanpa task yang didequeue
-  - execute_task_immediately(new_state, task) → Bekerja dengan new_state tanpa mengubah state asli
-  - process_next_pending_task/1 → Rekursi menggunakan state TERBARU dari langkah sebelumnya
+
+- dequeue_task(state) → Mengembalikan {task, new_state} di mana new_state adalah VERSI BARU tanpa task yang didequeue
+- execute_task_immediately(new_state, task) → Bekerja dengan new_state tanpa mengubah state asli
+- process_next_pending_task/1 → Rekursi menggunakan state TERBARU dari langkah sebelumnya
 
 Dibandingkan dengan bahasa imperative, tanggung jawab sepenuhnya dibebankan kepada developer untuk memahami codebase dengan jelas semua operasi yang mungkin memutasi state:
 
@@ -65,7 +113,7 @@ class Example {
   public void function() {
     this.state = "Correct";
     doComplexOperation();  // Operasi Kompleks
-    
+
     if (state.equals("Correct")) {  // ❌ Assumption broken!
       System.out.println("State is Correct");
     }
@@ -73,9 +121,9 @@ class Example {
   public void doComplexOperation(){
     doAnotherComplexOperation();  // Memanggil operasi kompleks lainnya
   }
-  
+
   ...
-  
+
   public void doAnotherComplexOperation(){
     this.state = "State Unexpectedly Mutated";  // ❌ Hidden mutation tanpa sepengetahuan function original
   }
@@ -84,7 +132,6 @@ class Example {
 
 Hal ini sangat penting untuk kasus Distributed System seperti MiniHadoop yang kita buat, immutability menjadi fundamental requirement karena tanpa immutability, sistem terdistribusi akan rentan terhadap Non-Deterministic bugs dan prilaku inkonsisten yang sulit di-debug dan di-maintain.
 
-
 ### 2. **Pattern Matching** — Declarative Way to Handle Distributed System Communication.
 
 Salah satu tantangan utama dalam sistem terdistribusi seperti MiniHadoop adalah bagaimana menangani komunikasi antar node (atau process di elixir) yang terlibat. Kompleksitas ini semakin meningkat seiring dengan bertambahnya tipe pesan dan kondisi bisnis, yang mana membuat kode sulit dimaintain dan rentan terhadap bugs. Pattern matching di Elixir memberikan solusi elegant dengan mengubah complex conditional logic menjadi declarative message routing yang predictable dan self-documenting.
@@ -92,22 +139,22 @@ Salah satu tantangan utama dalam sistem terdistribusi seperti MiniHadoop adalah 
 ```elixir
    # Task completes successfully
    def handle_info({task_ref, {:success, ref, task}}, state) when is_reference(task_ref) do
-     # Do something 
+     # Do something
    end
-   
+
    # Expected task failure
    def handle_info({task_ref, {:error, ref, task}}, state) when is_reference(task_ref) do
-     # Do something 
+     # Do something
    end
 
    # Normal process shutdown for completed tasks (perform cleanup)
    def handle_info({:DOWN, ref, :process, _pid, :normal}, state) do
-     # Do something 
+     # Do something
    end
 
    # Unexpected process shutdown, caused by unhandled failure
    def handle_info({:DOWN, ref, :process, _pid, reason}, state) when is_reference(ref) do
-     # Do something 
+     # Do something
    end
 ```
 
@@ -174,6 +221,7 @@ defp execute_map_phase(state) do
   )
 end
 ```
+
 Dibandingkan dengan OOP Polymorphism yang mencapai behavior variation melalui class inheritance dan method overriding, functional polymorphism melalui higher-order functions memberikan flexibility yang sama tanpa complex hierarchy. Pendekatan OOP traditional membutuhkan rigid class hierarchy dengan fixed method signatures yang menyebabkan tight coupling antara behavior dan class structure:
 
 ```java
@@ -217,14 +265,13 @@ result =
     end
   end)
 ```
+
 Mekanisme Lazy Evaluation dalam Kode:
 
 - `File.stream!` membuat lazy stream yang hanya membaca file ketika di-iterate
 - `Stream.with_index` dan `Stream.chunk_every` mempertahankan lazy behavior
 - `Enum.reduce_while` meng-consume stream secara bertahap, memproses satu chunk setiap kali
 - Setiap block dalam chunk diproses secara independen dengan `Task.async_stream` untuk distribusi parallel
-
-
 
 ### 5. **Monadic Execution Pipeline** — Elegant Way to Execute Tasks Pipeline with Error Handling and Unknown Runtime Behavior
 
@@ -245,10 +292,10 @@ Task execution pipeline.
 @spec execute_task(ComputeTask.t()) :: execution_result()
 def execute_task(task) do
   pure(task)
-  |> bind(&fetch_task_data/1)           
-  |> bind(&execute_user_function/1)     
-  |> bind(&normalize_user_result/1)     
-  |> bind(&mark_task_completed/1)       
+  |> bind(&fetch_task_data/1)
+  |> bind(&execute_user_function/1)
+  |> bind(&normalize_user_result/1)
+  |> bind(&mark_task_completed/1)
 end
 ```
 
@@ -262,24 +309,24 @@ public ExecutionResult executeTask(Task task) {
     if (data == null) {
         return ExecutionResult.error("Data fetch failed");
     }
-    
-    // Step 2: Must check error again  
+
+    // Step 2: Must check error again
     UserResult userResult = executeUserFunction(data);
     if (userResult.hasError()) {
         return ExecutionResult.error("User function failed: " + userResult.getError());
     }
-    
+
     // Step 3: More manual error checking
     NormalizedResult normalized = normalizeUserResult(userResult);
     if (!normalized.isValid()) {
         return ExecutionResult.error("Normalization failed");
     }
-    
+
     // Step 4: Final manual check
     if (!markTaskCompleted(normalized)) {
         return ExecutionResult.error("Completion marking failed");
     }
-    
+
     return ExecutionResult.success(normalized);
 }
 ```
@@ -287,6 +334,7 @@ public ExecutionResult executeTask(Task task) {
 Monadic pipeline menghilangkan boilerplate error handling yang repetitive, membuat code lebih clean dan focused pada business logic, sementara tetap maintaining comprehensive error propagation untuk custom user functions yang mungkin memiliki unpredictable runtime behavior.
 
 ### 6. **Pure-ish Functions** — Concurrent Execution Through Process Isolation Without Shared Memory
+
 Pure-ish functions adalah fungsi-fungsi yang memiliki side effects yang terkontrol namun tetap mempertahankan sifat deterministic melalui isolasi memory yang ketat. Konsep ini berbeda dengan pure functions murni yang sama sekali tidak memiliki side effects, tetapi tetap mempertahankan prinsip penting: tidak ada shared mutable state antara concurrent executions.
 
 Dalam paradigma functional programming seperti Elixir, setiap fungsi beroperasi pada data immutable dan setiap concurrent process memiliki memory space sendiri yang terisolasi. Ini menghilangkan kompleksitas synchronization yang biasanya menjadi tanggung jawab developer dalam paradigma imperative.
@@ -312,13 +360,14 @@ Dalam paradigma functional programming seperti Elixir, setiap fungsi beroperasi 
     end)
   end
 ```
+
 Fungsi process_single_map_filesebagai sebuah pure-ish function membaca map file yang terisolasi, setiap file merupakan unit pemrosesan independen yang tidak bergantung pada shared state. Meskipun melakukan I/O (side effect), fungsi ini tetap deterministic karena outputnya hanya bergantung pada konten file spesifik yang diproses, memungkinkan eksekusi concurrent tanpa synchronization.
 
 Dalam sistem terdistribusi seperti MiniHadoop, Elixir Process Model menghilangkan kompleksitas shared memory dengan memberikan setiap task memory space terisolasi. Hal ini memungkinkan developer fokus pada business logic, sementara platform menjamin memory isolation dan safe concurrent execution.
 
 ### 7. **Fault Tolerance & OTP** — Robust Error Recovery Through Immutability, Process Isolation, and Supervision Trees
 
-Fault tolerance dalam Elixir dibangun di atas fondasi konsep functional programming yang dikombinasikan dengan OTP (Open Telecom Platform) framework. Kombinasi *immutability*, *pure functions*, *pattern matching*, *process isolation*, dan *supervision trees* menciptakan sistem yang resilient terhadap failures tanpa complex error handling boilerplate. Setiap komponen dapat fail dengan graceful recovery, sementara state tetap konsisten berkat sifat immutable data structures.
+Fault tolerance dalam Elixir dibangun di atas fondasi konsep functional programming yang dikombinasikan dengan OTP (Open Telecom Platform) framework. Kombinasi _immutability_, _pure functions_, _pattern matching_, _process isolation_, dan _supervision trees_ menciptakan sistem yang resilient terhadap failures tanpa complex error handling boilerplate. Setiap komponen dapat fail dengan graceful recovery, sementara state tetap konsisten berkat sifat immutable data structures.
 
 ```elixir
 # Spawn task with supervision
@@ -329,7 +378,7 @@ task_async = Task.Supervisor.async_nolink(MiniHadoop.ComputeTask.TaskSupervisor,
   end
 end)
 
-# Pattern matched the message 
+# Pattern matched the message
 def handle_info({task_ref, {:success, ref, task}}, state) when is_reference(task_ref) do
   # Task success
 end
@@ -340,10 +389,11 @@ end
 ```
 
 Prinsip Fault Tolerance dalam Functional Programming:
-  - Immutability sebagai Safety Net: Data tidak bisa corrupt karena tidak ada in-place mutations
-  - Pure Functions untuk Deterministic Recovery: Fungsi dapat di-replay tanpa side effect yang unpredictable
-  - Pattern Matching untuk Explicit Error States: Error di-handle sebagai data, bukan exceptions yang tersembunyi
-  - Process Isolation untuk Fault Containment: Crash dalam satu process tidak mempengaruhi process lain
+
+- Immutability sebagai Safety Net: Data tidak bisa corrupt karena tidak ada in-place mutations
+- Pure Functions untuk Deterministic Recovery: Fungsi dapat di-replay tanpa side effect yang unpredictable
+- Pattern Matching untuk Explicit Error States: Error di-handle sebagai data, bukan exceptions yang tersembunyi
+- Process Isolation untuk Fault Containment: Crash dalam satu process tidak mempengaruhi process lain
 
 Dibandingkan dengan paradigma imperative seperti Java, fault tolerance sering bergantung pada complex exception handling dengan mutable state recovery:
 
@@ -352,19 +402,19 @@ Dibandingkan dengan paradigma imperative seperti Java, fault tolerance sering be
 public class TaskExecutor {
     private TaskState currentState;  // MUTABLE - prone to corruption
     private List<Task> pendingTasks; // MUTABLE - recovery complex
-    
+
     public void executeTask(Task task) {
         try {
             currentState.markStarted(task);  // In-place modification
             TaskResult result = runTaskLogic(task);  // May throw
             currentState.markCompleted(task, result); // Another mutation
-            
+
         } catch (Exception e) {
             // State mungkin sudah termutasi partial
             // Harus manual rollback ke consistent state
             currentState.rollback(task);  // Error-prone
             pendingTasks.add(task);       // Manual recovery logic
-            
+
             // Re-throw atau log - error handling scattered
             if (e instanceof TimeoutException) {
                 scheduleRetry(task);
@@ -375,15 +425,14 @@ public class TaskExecutor {
     }
 }
 ```
-Dalam distributed computing framework seperti MiniHadoop, fault tolerance adalah kebutuhan fundamental, bukan sekadar fitur tambahan: *Map/Reduce tasks* dapat mengalami kegagalan karena berbagai kondisi runtime seperti memory exhaustion, disk full, atau network timeout; *worker nodes* mungkin crash atau menjadi unreachable selama job execution berlangsung; dan *data corruption* atau malformed input dapat menyebabkan task failures yang tidak terduga.
 
-
+Dalam distributed computing framework seperti MiniHadoop, fault tolerance adalah kebutuhan fundamental, bukan sekadar fitur tambahan: _Map/Reduce tasks_ dapat mengalami kegagalan karena berbagai kondisi runtime seperti memory exhaustion, disk full, atau network timeout; _worker nodes_ mungkin crash atau menjadi unreachable selama job execution berlangsung; dan _data corruption_ atau malformed input dapat menyebabkan task failures yang tidak terduga.
 
 ## 🚀 Panduan Penggunaan
 
 ### 1. Persiapan Lingkungan
 
-Pastikan anda telah menginstalasi docker 
+Pastikan anda telah menginstalasi docker
 
 ```bash
 git clone <repository>
@@ -394,7 +443,7 @@ mix deps.get
 ### 2. Menjalankan Cluster Menggunakan Docker
 
 ```bash
-docker compose up --build 
+docker compose up --build
 docker compose up -d # Untuk menjalankan cluster di background
 ```
 
@@ -411,32 +460,44 @@ Di dalam Interactive Shell MasterNode kita dapat mengakses beberapa API yang tel
 ### Operasi Berkas Dasar
 
 1. Menyimpan file ke dalam DFS
+
 ```elixir
-# old
 MiniHadoop.store_file("<nama_file_dalam_DFS>", "<path/ke/file>")
+# contoh : MiniHadoop.store_file("ps", "test.txt")
+# file akan disimpan dengan nama "ps"
 ```
-Disclaimer, pastikan master node memiliki akses ke path file yang ingin disimpan. 
+
+Disclaimer, pastikan master node memiliki akses ke path file yang ingin disimpan.
 
 2. Mengambil file dari DFS
+
 ```elixir
 MiniHadoop.retrieve_file("<nama_file_dalam_DFS>")
+# contoh : MiniHadoop.retrieve_file("ps")
 ```
-File akan disimpan di direktori ./retrieve_result proyek
+
+File akan disimpan di direktori ./retrieve_files proyek
 
 3. Menghapus file dari DFS
+
 ```elixir
 MiniHadoop.delete_file("<nama_file_dalam_DFS>")
+# contoh : MiniHadoop.delete_file("ps")
 ```
+
 File akan dihapus dari DFS
 
 4. Melihat progress operasi file
+
 ```elixir
 MiniHadoop.file_op_info("id_operasi_file")
+# contoh : MiniHadoop.file_op_info("store_1")
 ```
 
 ### MapReduce Job
 
 1. Mendefinisikan Spesifikasi dan Menjalankan MapReduce Job
+
 ```elixir
 {:ok, job_spec} = MiniHadoop.Models.JobSpec.create([
     job_name: "word_count_analysis",
@@ -446,16 +507,17 @@ MiniHadoop.file_op_info("id_operasi_file")
   ])
 MiniHadoop.submit_job(job_spec)
 ```
+
 Hasil MapReduce Job akan disimpan di direktori ./job_result proyek
 
 nilai map_module dan reduce_module merupakan module yang mengimplementasikan behaviour MiniHadoop.Map.MapBehaviour dan MiniHadoop.Reduce.ReduceBehaviour
 
-Anda dapat membuat implementasi costum untuk Map dan Reduce dengan membuat module baru yang mengimplementasikan behaviour MiniHadoop.Map.MapBehaviour dan MiniHadoop.Reduce.ReduceBehaviour.
+Anda dapat membuat implementasi custom untuk Map dan Reduce dengan membuat module baru yang mengimplementasikan behaviour MiniHadoop.Map.MapBehaviour dan MiniHadoop.Reduce.ReduceBehaviour.
 
 ```elixir
 defmodule MiniHadoop.Map.Examples.CostumMap do
   @behaviour MiniHadoop.Map.MapBehaviour
-  
+
   @impl true
   def map(data, context) do
     # Implementasi costum map
@@ -465,7 +527,7 @@ end
 
 defmodule MiniHadoop.Reduce.Examples.CostumReduce do
   @behaviour MiniHadoop.Reduce.ReduceBehaviour
-  
+
   @impl true
   def reduce(data, context) do
     # Implementasi costum reduce
@@ -473,18 +535,316 @@ defmodule MiniHadoop.Reduce.Examples.CostumReduce do
 end
 ```
 
+## 🔬 Algoritma MapReduce yang Didukung
 
+MiniHadoop menyediakan implementasi untuk dua algoritma MapReduce klasik yang sering digunakan dalam distributed computing: **WordCount** dan **PageRank**. Kedua algoritma ini mendemonstrasikan kekuatan paradigm functional programming dalam menangani pemrosesan data terdistribusi.
 
+### 1. WordCount Algorithm
 
+WordCount adalah algoritma fundamental dalam ecosystem MapReduce yang menghitung frekuensi kemunculan setiap kata dalam kumpulan dokumen. Algoritma ini menjadi "Hello World" untuk distributed computing karena kesederhanaannya yang elegant namun representatif terhadap pola umum dalam big data processing.
 
-## 🛠️ Troubleshooting
+#### Cara Kerja WordCount
 
-```bash
-docker-compose ps
-docker-compose logs -f master
-docker-compose down -v
-docker-compose up --build
+**Map Phase:**
+
+```elixir
+def word_count_mapper(line, _context) do
+  line
+  |> String.downcase()
+  |> String.replace(~r/[^\w\s]/, "")  # Remove punctuation
+  |> String.split()
+  |> Enum.map(fn word -> {word, 1} end)
+end
 ```
+
+**Reduce Phase:**
+
+```elixir
+def word_count_reducer({word, counts}, _context) do
+  total_count = Enum.sum(counts)
+  {word, total_count}
+end
+```
+
+#### Functional Programming Advantages dalam WordCount
+
+1. **Immutability**: Setiap transformasi string menghasilkan string baru, menghindari side effects
+2. **Pure Functions**: Map dan reduce functions deterministic—input yang sama selalu menghasilkan output yang sama
+3. **Lazy Evaluation**: File besar diproses secara streaming tanpa memuat seluruh konten ke memory
+4. **Composability**: Pipeline transformasi dapat di-compose dengan operator `|>`
+
+#### Contoh Penggunaan WordCount
+
+```elixir
+# Store input file
+MiniHadoop.store_file("document.txt", "/path/to/large/document.txt")
+
+# Create and submit WordCount job
+{:ok, job_spec} = MiniHadoop.Models.JobSpec.create([
+  job_name: "word_frequency_analysis",
+  input_files: ["document.txt"],
+  map_function: &MiniHadoop.Examples.WordCount.word_count_mapper/2,
+  reduce_function: &MiniHadoop.Examples.WordCount.word_count_reducer/2
+])
+
+{:ok, job_id} = MiniHadoop.submit_job(job_spec)
+```
+
+**Output Example:**
+
+```json
+{
+  "the": 1542,
+  "distributed": 89,
+  "system": 156,
+  "elixir": 67,
+  "functional": 45
+}
+```
+
+---
+
+### 2. PageRank Algorithm
+
+PageRank adalah algoritma yang dikembangkan oleh Larry Page dan Sergey Brin (founders Google) untuk menentukan importance/authority sebuah web page berdasarkan link structure. Algoritma ini revolusioner dalam search engine technology dan menjadi fondasi awal Google Search.
+
+#### Mathematical Foundation
+
+PageRank menggunakan konsep **random walk** pada graph structure. Formula matematis:
+
+$$PR(A) = \frac{1-d}{N} + d \sum_{i=1}^{M} \frac{PR(T_i)}{C(T_i)}$$
+
+Dimana:
+
+- $PR(A)$ = PageRank value untuk page A
+- $d$ = damping factor (biasanya 0.85)
+- $N$ = total number of pages
+- $T_i$ = pages yang memiliki link ke page A
+- $C(T_i)$ = number of outbound links dari page $T_i$
+- $M$ = number of pages yang link ke A
+
+#### Implementation dalam MiniHadoop
+
+**Map Phase (First Iteration):**
+
+```elixir
+def pagerank_mapper(line, context) do
+  damping_factor = Map.get(context, :damping_factor, 0.85)
+  total_pages = Map.get(context, :total_pages, 1)
+
+  [from_page | to_pages] = String.split(line, "\t")
+
+  # Initial PageRank distribution
+  initial_rank = (1.0 - damping_factor) / total_pages
+
+  # Distribute rank to outbound links
+  rank_per_link = initial_rank / length(to_pages)
+
+  Enum.map(to_pages, fn to_page ->
+    {to_page, rank_per_link}
+  end)
+end
+```
+
+**Map Phase (Subsequent Iterations):**
+
+```elixir
+def pagerank_mapper(line, context) do
+  damping_factor = Map.get(context, :damping_factor, 0.85)
+  pagerank_file = Map.get(context, :pagerank_file)
+
+  # Load previous iteration results
+  previous_ranks = load_previous_pagerank(pagerank_file)
+
+  [from_page | to_pages] = String.split(line, "\t")
+  current_rank = Map.get(previous_ranks, from_page, 0.0)
+
+  # Distribute current rank to outbound links
+  rank_per_link = (damping_factor * current_rank) / length(to_pages)
+
+  Enum.map(to_pages, fn to_page ->
+    {to_page, rank_per_link}
+  end)
+end
+```
+
+**Reduce Phase:**
+
+```elixir
+def pagerank_reducer({page, incoming_ranks}, context) do
+  damping_factor = Map.get(context, :damping_factor, 0.85)
+  total_pages = Map.get(context, :total_pages, 1)
+
+  # Sum all incoming rank contributions
+  rank_sum = Enum.sum(incoming_ranks)
+
+  # Apply PageRank formula
+  final_rank = (1.0 - damping_factor) / total_pages + rank_sum
+
+  {page, final_rank}
+end
+```
+
+#### Iterative Computation Process
+
+PageRank membutuhkan iterative computation hingga convergence. MiniHadoop mendukung multi-iteration jobs:
+
+```elixir
+# First iteration
+{:ok, first_job} = MiniHadoop.Models.JobSpec.create([
+  job_name: "pagerank_iteration_1",
+  input_files: ["web_links.tsv"],
+  map_function: &MiniHadoop.Examples.PageRank.pagerank_mapper/2,
+  reduce_function: &MiniHadoop.Examples.PageRank.pagerank_reducer/2,
+  map_context: %{
+    damping_factor: 0.85,
+    total_pages: 41332
+  },
+  reduce_context: %{
+    damping_factor: 0.85,
+    total_pages: 41332
+  },
+  sort_result_opt: {:value, :desc}
+])
+
+MiniHadoop.submit_job(first_job)
+
+# Second iteration (menggunakan hasil dari iterasi pertama)
+{:ok, second_job} = MiniHadoop.Models.JobSpec.create([
+  job_name: "pagerank_iteration_2",
+  input_files: ["web_links.tsv"],
+  map_function: &MiniHadoop.Examples.PageRank.pagerank_mapper/2,
+  reduce_function: &MiniHadoop.Examples.PageRank.pagerank_reducer/2,
+  map_context: %{
+    pagerank_file: "/shared/page_rank_iter_1.json",
+    damping_factor: 0.85,
+    total_pages: 41332
+  },
+  reduce_context: %{
+    damping_factor: 0.85,
+    total_pages: 41332
+  },
+  sort_result_opt: {:value, :desc}
+])
+
+MiniHadoop.submit_job(second_job)
+```
+
+#### Input Format
+
+PageRank expects tab-separated input format:
+
+```
+page1	page2	page3	page4
+page2	page1	page5
+page3	page1	page2	page6
+```
+
+#### Functional Programming Benefits dalam PageRank
+
+1. **Stateless Iterations**: Setiap iterasi adalah pure function dari hasil iterasi sebelumnya
+2. **Immutable Graph Structure**: Link graph tidak berubah selama computation
+3. **Composable Transformations**: Rank calculations dapat di-compose dengan mathematical operations
+4. **Distributed Convergence**: Convergence checking dapat dilakukan secara distributed tanpa global state
+5. **Fault Tolerance**: Jika iteration gagal, dapat di-restart dari checkpoint terakhir tanpa corruption
+
+#### Convergence dan Optimization
+
+Typically, PageRank converge setelah 10-50 iterasi tergantung pada:
+
+- **Graph size dan density**
+- **Desired precision tolerance**
+- **Damping factor value**
+
+```elixir
+# Helper function untuk check convergence
+def check_convergence(previous_ranks, current_ranks, tolerance \\ 0.0001) do
+  differences =
+    Map.merge(previous_ranks, current_ranks, fn _key, old_val, new_val |
+      abs(new_val - old_val)
+    end)
+
+  max_difference = differences |> Map.values() |> Enum.max()
+  max_difference < tolerance
+end
+```
+
+**Output Example (Top 10 Pages):**
+
+```json
+{
+  "homepage.html": 0.384729,
+  "main_article.html": 0.297156,
+  "index.html": 0.201847,
+  "about.html": 0.156892,
+  "contact.html": 0.089234,
+  "blog_post_1.html": 0.067123,
+  "products.html": 0.054967,
+  "services.html": 0.043821,
+  "news.html": 0.038194,
+  "faq.html": 0.032156
+}
+```
+
+---
+
+### 3. Perbandingan Algorithmic Complexity
+
+| Algoritma | Time Complexity | Space Complexity          | Convergence         | Use Cases                            |
+| --------- | --------------- | ------------------------- | ------------------- | ------------------------------------ |
+| WordCount | O(n)            | O(k) where k=unique words | Single pass         | Text analysis, log processing        |
+| PageRank  | O(i × n × m)    | O(n)                      | Multiple iterations | Web ranking, social network analysis |
+
+**Notes:**
+
+- n = input size, m = average links per page, i = iterations until convergence
+- k = vocabulary size (typically k << n for natural language)
+
+### 4. Advanced Usage Patterns
+
+#### Custom MapReduce Functions
+
+Anda dapat mengimplementasikan algoritma MapReduce custom dengan mengikuti pattern yang sama:
+
+```elixir
+defmodule MyCustomAlgorithm do
+  def custom_mapper(input, context) do
+    # Your custom map logic
+    # Must return list of {key, value} tuples
+  end
+
+  def custom_reducer({key, values}, context) do
+    # Your custom reduce logic
+    # Must return {key, reduced_value}
+  end
+end
+
+# Usage
+{:ok, job_spec} = MiniHadoop.Models.JobSpec.create([
+  job_name: "custom_analysis",
+  input_files: ["data.txt"],
+  map_function: &MyCustomAlgorithm.custom_mapper/2,
+  reduce_function: &MyCustomAlgorithm.custom_reducer/2,
+  map_context: %{custom_param: "value"},
+  reduce_context: %{another_param: 42}
+])
+```
+
+#### Context-Aware Processing
+
+Context parameters memungkinkan dynamic behavior dalam map/reduce functions:
+
+```elixir
+def context_aware_mapper(line, context) do
+  case Map.get(context, :processing_mode) do
+    "word_count" -> word_count_logic(line)
+    "ngram_analysis" -> ngram_logic(line, context[:n])
+    "sentiment" -> sentiment_analysis(line, context[:model])
+  end
+end
+```
+
+Implementasi algoritma-algoritma ini dalam MiniHadoop mendemonstrasikan kekuatan functional programming untuk distributed computing: **immutability** memastikan consistency across distributed nodes, **pure functions** memungkinkan reliable parallel execution, dan **composability** memberikan flexibility dalam membangun complex data processing pipelines.
 
 ## 📄 Lisensi
 

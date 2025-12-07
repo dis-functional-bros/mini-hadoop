@@ -1,14 +1,14 @@
 defmodule MiniHadoop.Master.FileOperation do
-use GenServer
+  use GenServer
   require Logger
   alias MiniHadoop.Models.FileTask
   alias MiniHadoop.Models.Block
   alias MiniHadoop.Master.MasterNode
 
   @default_timeout 3_000_000
-  @batch_size Application.get_env(:mini_hadoop, :batch_size, 100)
-  @replication_factor Application.get_env(:mini_hadoop, :block_replication_factor, 2)
-  @max_concurrency Application.get_env(:mini_hadoop, :max_concurrency, 10_000)
+  @batch_size Application.compile_env(:mini_hadoop, :batch_size, 100)
+  @replication_factor Application.compile_env(:mini_hadoop, :block_replication_factor, 2)
+  @max_concurrency Application.compile_env(:mini_hadoop, :max_concurrency, 10_000)
 
   def start_link(_) do
     GenServer.start_link(__MODULE__, %{operations: %{}, next_id: 1}, name: __MODULE__)
@@ -32,22 +32,24 @@ use GenServer
     GenServer.call(__MODULE__, {:get_operation_info, task_id}, @default_timeout)
   end
 
+  @impl true
   def init(_) do
     retrieve_result_path = Application.get_env(:mini_hadoop, :retrieve_result_path)
     {:ok, %{operations: %{}, next_id: 1, retrieve_result_path: retrieve_result_path}}
   end
 
+  @impl true
   def handle_cast({:update_operation, operation_id, operation_new_state}, state) do
     new_state = %{state | operations: Map.put(state.operations, operation_id, operation_new_state)}
     {:noreply, new_state}
   end
 
+  @impl true
   def handle_call({:get_operation_info, operation_id}, _from, state) do
     {:reply, Map.get(state.operations, operation_id), state}
   end
 
-  # ---------------------
-  # GenServer Callbacks
+  @impl true
   def handle_call({:submit_store, filename, file_path}, _from, state) do
     cond do
       !File.exists?(file_path) ->
@@ -59,6 +61,7 @@ use GenServer
     end
   end
 
+  @impl true
   def handle_call({:submit_retrieve, filename}, _from, state) do
     cond do
       filename == "" ->
@@ -70,6 +73,7 @@ use GenServer
     end
   end
 
+  @impl true
   def handle_call({:submit_delete, filename}, _from, state) do
     cond do
       filename == "" ->
@@ -128,12 +132,6 @@ use GenServer
     failed
   end
 
-  defp complete_and_update(task, message) do
-    completed = FileTask.mark_completed(task, message)
-    update_operation(completed)
-    completed
-  end
-
   defp safe_call(pid, request) do
     GenServer.call(pid, request, @default_timeout)
   rescue
@@ -171,7 +169,7 @@ use GenServer
 
                   # Sequential replication
                   success_count =
-                    Enum.reduce_while(1..@replication_factor, 0, fn attempt, count ->
+                    Enum.reduce_while(1..@replication_factor, 0, fn _attempt, count ->
                       case wait_for_worker(block_id) do
                         :no_worker_registered ->
                           {:cont, count}
@@ -236,7 +234,7 @@ use GenServer
 
         {:error, reason}
 
-      {:ok, reversed_chunk_list, final_processed} ->
+      {:ok, reversed_chunk_list, _final_processed} ->
         # Reverse chunks to get correct order, then flatten
         sorted_block_ids_with_index =
           reversed_chunk_list
@@ -375,7 +373,7 @@ use GenServer
           case final_result do
             {:ok, processed_count} ->
               if processed_count == num_blocks do
-                task_with_final_progress = FileTask.update_progress(
+                _task_with_final_progress = FileTask.update_progress(
                   task,
                   num_blocks,
                   num_blocks,
@@ -440,7 +438,7 @@ use GenServer
                     chunk
                     |> Task.async_stream(
                       fn {_index, block_id, worker_pids} ->
-                        {failed_deletion, success_count} =
+                        {failed_deletion, _success_count} =
                           Enum.reduce_while(worker_pids, {nil, 0}, fn worker_pid, {failed, success_count} ->
                             case safe_call(worker_pid, {:delete_block, block_id}) do
                               {operation, updated_worker_state} when operation in [:store, :delete] ->
@@ -496,7 +494,7 @@ use GenServer
             {{:error, reason}, _processed_count} ->
               {:error, reason}
 
-            {:ok, final_processed} ->
+            {:ok, _final_processed} ->
               MasterNode.rebuild_tree_after_deletion()
               MasterNode.unregister_file_blocks(task.filename)
 
