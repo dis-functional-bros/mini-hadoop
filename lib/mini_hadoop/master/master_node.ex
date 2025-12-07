@@ -249,11 +249,12 @@ defmodule MiniHadoop.Master.MasterNode do
 
   # implementation for re-replication of blocks
   @impl true
-  def handle_info({:DOWN, worker_pid, _, _, _}, state) do
+  def handle_info({:DOWN, _ref, :process, worker_pid, _reason}, state) do
+
     Logger.warning("Worker #{inspect(worker_pid)} went down, starting re-replication process")
 
     # Get all blocks that were stored on the failed worker
-    block_ids = Map.get(state.worker_to_block_mapping, worker_pid, MapSet.new()) |> MapSet.to_list()
+    block_ids = Map.get(state.worker_to_block_mapping, worker_pid, %{}) |> Map.keys()
 
     # for every under-replicated block
     replication_results =
@@ -270,7 +271,10 @@ defmodule MiniHadoop.Master.MasterNode do
 
           # Still have replicas
           true ->
-            case find_smallest_excluding(state.tree, current_replicas) do
+            # Exclude current replicas AND the dead worker from being selected as target
+            exclusion_list = [worker_pid | current_replicas]
+            
+            case find_smallest_excluding(state.tree, exclusion_list) do
               {:ok, {_count, target_worker_pid}, _hostname} ->
 
                 source_worker_pid = hd(current_replicas)
@@ -319,15 +323,15 @@ defmodule MiniHadoop.Master.MasterNode do
       |> Map.new()
 
     # remove dead worker from all mappings
-    dead_worker_hostname =
-      Enum.find_value(state.workers, fn {hostname, info} ->
-        if info.pid == worker_pid, do: hostname
-      end)
-
-    new_workers = if dead_worker_hostname do
-      Map.delete(state.workers, dead_worker_hostname)
-    else
+    new_workers = 
       state.workers
+      |> Enum.reject(fn {_hostname, info} -> info.pid == worker_pid end)
+      |> Map.new()
+      
+    if map_size(new_workers) < map_size(state.workers) do
+      Logger.info("Removed worker #{inspect(worker_pid)} from workers list.")
+    else
+      Logger.warning("Worker #{inspect(worker_pid)} not found in workers list during DOWN handling.")
     end
 
     new_worker_to_block_mapping = Map.delete(state.worker_to_block_mapping, worker_pid)
