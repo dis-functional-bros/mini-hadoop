@@ -22,14 +22,31 @@ MiniHadoop dibangun menggunakan arsitektur Master-Worker berbasis **Elixir OTP**
     *   **FileOperation**: Menangani operasi sistem berkas terdistribusi (DFS), termasuk manajemen metadata blok dan strategi penempatan data.
     *   **ComputeOperation**: Mengelola siklus hidup job, antrian job (*job queue*), dan koordinasi status global job.
     *   **JobSupervisor**: `DynamicSupervisor` yang membuat dan mengawasi proses `JobRunner` yang terisolasi untuk setiap job yang aktif.
-
 *   **Worker Node**:
     *   **WorkerNode**: Proses utama (*GenServer*) yang memelihara koneksi persisten ke Master dan melaporkan status kapasitas serta ketersediaan node.
     *   **TaskSupervisor**: `Task.Supervisor` yang mengeksekusi fungsi Map dan Reduce pengguna secara aman dan terisolasi (*sandboxed execution*).
     *   **RunnerAndStorageSupervisor**: `DynamicSupervisor` yang mengelola komponen pendukung untuk eksekusi tugas dan penyimpanan hasil sementara.
-
+    
+### ⚙️ Komponen Kunci OTP: GenServer & Supervisor
 *   **Job Execution Flow**:
     *   **JobRunner**: Proses orkestrator (satu per job) yang bertanggung jawab memecah input menjadi beberapa task, menjadwalkan task ke worker yang tersedia, menangani kegagalan task (*fault tolerance*), dan melakukan agregasi hasil akhir.
+
+MiniHadoop secara ekstensif menggunakan komponen Open Telecom Platform (OTP) untuk membangun sistem terdistribusi yang andal.
+
+* **GenServer (Generic Server):**
+    * **Peran:** Digunakan sebagai *blueprint* untuk setiap komponen yang perlu memelihara *state* (keadaan) dan menangani komunikasi *asynchronous* (*message passing*) di seluruh cluster.
+    * **Penerapan:**
+        * **MasterNode** dan **WorkerNode** diimplementasikan sebagai `GenServer` untuk mengelola *state* cluster (membership, load, metadata) secara aman. *GenServer* memastikan *state* diubah secara *sequential* (satu per satu) meskipun menerima pesan dari ribuan proses secara *concurrent*.
+
+* **DynamicSupervisor:**
+    * **Peran:** Digunakan untuk mengawasi proses-proses yang memiliki siklus hidup yang tidak diketahui di awal (*dynamic children*). Jika proses anak gagal, Supervisor akan mencoba memulai ulangnya sesuai dengan strategi yang ditetapkan (*fault tolerance*).
+    * **Penerapan:**
+        * **JobSupervisor** (di Master Node) menggunakan `DynamicSupervisor` untuk membuat dan mengawasi proses **JobRunner** baru setiap kali *user* mengirimkan MapReduce *job*.
+        * **RunnerAndStorageSupervisor** (di Worker Node) juga menggunakan `DynamicSupervisor` untuk mengelola proses-proses *temporary* yang diperlukan untuk eksekusi tugas dan penyimpanan.
+
+**Keunggulan Kombinasi OTP:**
+
+Kombinasi **GenServer** (untuk *state* yang aman) dan **Supervisor** (untuk *fault tolerance*) memungkinkan MiniHadoop bekerja seperti *distributed operating system*. *GenServer* menangani *coordination logic* (Master/Worker), sementara *Supervisors* menjamin bahwa *pure execution* (Map/Reduce tasks) dapat gagal dan dihidupkan kembali tanpa merusak *state* global.
 
 </details>
 
