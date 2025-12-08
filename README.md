@@ -12,6 +12,8 @@ Sebuah Distributed File System (DFS) yang terinspirasi dari Hadoop, dikembangkan
 
 ## 🏗️ Arsitektur Sistem
 
+<details>
+<summary><b>Klik untuk melihat detail arsitektur</b></summary>
 
 MiniHadoop dibangun menggunakan arsitektur Master-Worker berbasis **Elixir OTP** yang memanfaatkan kekuatan *actor model* untuk konkurensi dan toleransi kesalahan.
 
@@ -29,7 +31,12 @@ MiniHadoop dibangun menggunakan arsitektur Master-Worker berbasis **Elixir OTP**
 *   **Job Execution Flow**:
     *   **JobRunner**: Proses orkestrator (satu per job) yang bertanggung jawab memecah input menjadi beberapa task, menjadwalkan task ke worker yang tersedia, menangani kegagalan task (*fault tolerance*), dan melakukan agregasi hasil akhir.
 
+</details>
+
 ## 🧠 Wawasan Pengembangan & Tantangan Teknis
+
+<details>
+<summary><b>Klik untuk melihat learning dan challenges</b></summary>
 
 ### Kompleksitas Distribusi dan Manajemen State
 
@@ -74,9 +81,12 @@ Elixir terbukti sangat powerful untuk menangani sistem terdistribusi karena:
 - **Atomic operations**: Pattern matching pada RPC calls memberikan atomicity
 - **Separation of concerns**: Memisahkan pure function dari side effects untuk maintainability
 
+</details>
+
 ## 🎓 Aspek Functional Programming
 
-### 1. **State Immutability** - Foundation for Predictable Distributed Systems
+<details>
+<summary><b>1. State Immutability - Foundation for Predictable Distributed Systems</b></summary>
 
 Immutability memastikan state program selalu predictable dan tidak berubah tanpa sepengetahuan developer. Setiap transformasi data bersifat eksplisit sehingga mudah dilacak dan dipahami alurnya. Hal ini menghilangkan bugs yang disebabkan oleh hidden state mutations dalam codebase yang besar.
 
@@ -130,7 +140,10 @@ class Example {
 
 Hal ini sangat penting untuk kasus Distributed System seperti MiniHadoop yang kita buat, immutability menjadi fundamental requirement karena tanpa immutability, sistem terdistribusi akan rentan terhadap Non-Deterministic bugs dan prilaku inkonsisten yang sulit di-debug dan di-maintain.
 
-### 2. **Pattern Matching** — Declarative Way to Handle Distributed System Communication.
+</details>
+
+<details>
+<summary><b>2. Pattern Matching — Declarative Way to Handle Distributed System Communication</b></summary>
 
 Salah satu tantangan utama dalam sistem terdistribusi seperti MiniHadoop adalah bagaimana menangani komunikasi antar node (atau process di elixir) yang terlibat. Kompleksitas ini semakin meningkat seiring dengan bertambahnya tipe pesan dan kondisi bisnis, yang mana membuat kode sulit dimaintain dan rentan terhadap bugs. Pattern matching di Elixir memberikan solusi elegant dengan mengubah complex conditional logic menjadi declarative message routing yang predictable dan self-documenting.
 
@@ -179,7 +192,10 @@ public void handleMessage(Object message, SystemState state) {
 }
 ```
 
-### 3. **Higher-Order Functions** — Functional Polymorphism for Distributed Workflow Orchestration
+</details>
+
+<details>
+<summary><b>3. Higher-Order Functions — Functional Polymorphism for Distributed Workflow Orchestration</b></summary>
 
 Higher-order functions memungkinkan functional polymorphism—runtime behavior variation melalui function composition, bukan class inheritance. Dalam distributed systems, pendekatan ini memungkinkan kita membangun workflow orchestration yang highly composable dengan meng-inject phase-specific behaviors sebagai parameters.
 
@@ -237,7 +253,10 @@ public class MapPhaseExecutor extends PhaseExecutor {
 // Harus buat subclass baru untuk setiap phase type
 ```
 
-### 4. **Lazy Evaluation** — Efficient Large-Scale File Processing Through On-Demand Loading
+</details>
+
+<details>
+<summary><b>4. Lazy Evaluation — Efficient Large-Scale File Processing Through On-Demand Loading</b></summary>
 
 Lazy evaluation memungkinkan MiniHadoop memproses file berukuran besar tanpa perlu meload seluruh konten ke memory sekaligus. Daripada membaca seluruh file dan membebani memory, sistem hanya meload dan memproses chunk file ketika benar-benar dibutuhkan oleh processing pipeline.
 
@@ -271,7 +290,10 @@ Mekanisme Lazy Evaluation dalam Kode:
 - `Enum.reduce_while` meng-consume stream secara bertahap, memproses satu chunk setiap kali
 - Setiap block dalam chunk diproses secara independen dengan `Task.async_stream` untuk distribusi parallel
 
-### 5. **Monadic Execution Pipeline** — Elegant Way to Execute Tasks Pipeline with Error Handling and Unknown Runtime Behavior
+</details>
+
+<details>
+<summary><b>5. Monadic Execution Pipeline — Elegant Way to Execute Tasks Pipeline with Error Handling</b></summary>
 
 Monadic execution pipeline memungkinkan kita mengeksekusi sequence operations dengan error handling yang elegant, di mana setiap step tidak perlu mengetahui status step sebelumnya. Pipeline akan otomatis short-circuit ketika terjadi error, dan error handling dilakukan secara terpusat di akhir tanpa mengganggu flow logic utama. Pendekatan ini penting untuk program seperti MiniHadoop yang memungkinkan user meng-inject custom functions dengan runtime behavior yang unpredictable.
 
@@ -331,7 +353,10 @@ public ExecutionResult executeTask(Task task) {
 
 Monadic pipeline menghilangkan boilerplate error handling yang repetitive, membuat code lebih clean dan focused pada business logic, sementara tetap maintaining comprehensive error propagation untuk custom user functions yang mungkin memiliki unpredictable runtime behavior.
 
-### 6. **Pure-ish Functions** — Concurrent Execution Through Process Isolation Without Shared Memory
+</details>
+
+<details>
+<summary><b>6. Pure-ish Functions — Concurrent Execution Through Process Isolation Without Shared Memory</b></summary>
 
 Pure-ish functions adalah fungsi-fungsi yang memiliki side effects yang terkontrol namun tetap mempertahankan sifat deterministic melalui isolasi memory yang ketat. Konsep ini berbeda dengan pure functions murni yang sama sekali tidak memiliki side effects, tetapi tetap mempertahankan prinsip penting: tidak ada shared mutable state antara concurrent executions.
 
@@ -363,7 +388,10 @@ Fungsi process_single_map_filesebagai sebuah pure-ish function membaca map file 
 
 Dalam sistem terdistribusi seperti MiniHadoop, Elixir Process Model menghilangkan kompleksitas shared memory dengan memberikan setiap task memory space terisolasi. Hal ini memungkinkan developer fokus pada business logic, sementara platform menjamin memory isolation dan safe concurrent execution.
 
-### 7. **Fault Tolerance & OTP** — Robust Error Recovery Through Immutability, Process Isolation, and Supervision Trees
+</details>
+
+<details>
+<summary><b>7. Fault Tolerance & OTP — Robust Error Recovery Through Immutability and Supervision Trees</b></summary>
 
 Fault tolerance dalam Elixir dibangun di atas fondasi konsep functional programming yang dikombinasikan dengan OTP (Open Telecom Platform) framework. Kombinasi _immutability_, _pure functions_, _pattern matching_, _process isolation_, dan _supervision trees_ menciptakan sistem yang resilient terhadap failures tanpa complex error handling boilerplate. Setiap komponen dapat fail dengan graceful recovery, sementara state tetap konsisten berkat sifat immutable data structures.
 
@@ -426,7 +454,12 @@ public class TaskExecutor {
 
 Dalam distributed computing framework seperti MiniHadoop, fault tolerance adalah kebutuhan fundamental, bukan sekadar fitur tambahan: _Map/Reduce tasks_ dapat mengalami kegagalan karena berbagai kondisi runtime seperti memory exhaustion, disk full, atau network timeout; _worker nodes_ mungkin crash atau menjadi unreachable selama job execution berlangsung; dan _data corruption_ atau malformed input dapat menyebabkan task failures yang tidak terduga.
 
+</details>
+
 ## 🚀 Panduan Penggunaan
+
+<details>
+<summary><b>Klik untuk melihat panduan setup dan penggunaan</b></summary>
 
 ### 1. Persiapan Lingkungan
 
@@ -451,9 +484,12 @@ docker compose up -d # Untuk menjalankan cluster di background
 docker exec -it master_node iex --remsh master@master --cookie secret
 ```
 
+</details>
+
 ## 📚 Contoh Penggunaan API
 
-### Text File Generation and File Cleanup
+<details>
+<summary><b>Text File Generation and File Cleanup</b></summary>
 
 1. Generate text file for word count job
 
@@ -472,8 +508,10 @@ mkdir -p ./data ./retrieved_files ./job_results ./temp ./logs
 
 Untuk memudahkan debugging, volume container telah di petakan ke dalam beberapa direktori khusus di dalam proyek. Untuk membersihkan file yang dihasilkan oleh program, kita dapat menggunakan perintah di atas (menghapus folder dan membuatnya kembali dalam keadaan kosong).
 
+</details>
 
-### Operasi Berkas Dasar
+<details>
+<summary><b>Operasi Berkas Dasar</b></summary>
 
 Di dalam Interactive Shell MasterNode kita dapat mengakses beberapa API yang telah disediakan
 
@@ -512,7 +550,10 @@ MiniHadoop.file_op_info("id_operasi_file")
 # contoh : MiniHadoop.file_op_info("store_1")
 ```
 
-### MapReduce Job
+</details>
+
+<details>
+<summary><b>MapReduce Job</b></summary>
 
 1. Mendefinisikan Spesifikasi dan Menjalankan MapReduce Job.
 
@@ -546,8 +587,10 @@ Untuk membuat spesifikasi job, gunakan fungsi `MiniHadoop.Models.JobSpec.create/
 MiniHadoop.submit_job(job_spec)
 ```
 
+</details>
 
-### Output Job
+<details>
+<summary><b>Output Job</b></summary>
 
 Setiap job akan menghasilkan dua file output di direktori hasil:
 
@@ -577,12 +620,12 @@ key_4	value_4
 key_5	value_5
 ```
 
+</details>
 
 ## 🔬 Contoh Algoritma MapReduce yang Didukung
 
-MiniHadoop menyediakan implementasi untuk dua algoritma MapReduce klasik yang sering digunakan dalam distributed computing: **WordCount** dan **PageRank**. Kedua algoritma ini mendemonstrasikan kekuatan paradigm functional programming dalam menangani pemrosesan data terdistribusi.
-
-### 1. WordCount Algorithm
+<details>
+<summary><b>1. WordCount Algorithm</b></summary>
 
 WordCount adalah algoritma fundamental dalam ecosystem MapReduce yang menghitung frekuensi kemunculan setiap kata dalam kumpulan dokumen. Algoritma ini menjadi "Hello World" untuk distributed computing karena kesederhanaannya yang elegant namun representatif terhadap pola umum dalam big data processing.
 
@@ -633,7 +676,10 @@ MiniHadoop.store_file("document.txt", "/path/to/large/document.txt")
 MiniHadoop.submit_job(job_spec)
 ```
 
-### 2. PageRank Algorithm
+</details>
+
+<details>
+<summary><b>2. PageRank Algorithm</b></summary>
 
 PageRank adalah algoritma yang dikembangkan oleh Larry Page dan Sergey Brin (founders Google) untuk menentukan importance/authority sebuah web page berdasarkan link structure. Algoritma ini revolusioner dalam search engine technology dan menjadi fondasi awal Google Search.
 
@@ -823,9 +869,10 @@ news.html	0.038194
 faq.html	0.032156
 ```
 
----
+</details>
 
-### 3. Perbandingan Algorithmic Complexity
+<details>
+<summary><b>3. Perbandingan Algorithmic Complexity</b></summary>
 
 | Algoritma | Time Complexity | Space Complexity          | Convergence         | Use Cases                            |
 | --------- | --------------- | ------------------------- | ------------------- | ------------------------------------ |
@@ -837,7 +884,10 @@ faq.html	0.032156
 - n = input size, m = average links per page, i = iterations until convergence
 - k = vocabulary size (typically k << n for natural language)
 
-### 4. Advanced Usage Patterns
+</details>
+
+<details>
+<summary><b>4. Advanced Usage Patterns</b></summary>
 
 #### Custom MapReduce Functions
 
@@ -882,6 +932,8 @@ end
 ```
 
 Implementasi algoritma-algoritma ini dalam MiniHadoop mendemonstrasikan kekuatan functional programming untuk distributed computing: **immutability** memastikan consistency across distributed nodes, **pure functions** memungkinkan reliable parallel execution, dan **composability** memberikan flexibility dalam membangun complex data processing pipelines.
+
+</details>
 
 ## 📄 Lisensi
 
