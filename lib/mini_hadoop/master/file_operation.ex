@@ -16,8 +16,8 @@ defmodule MiniHadoop.Master.FileOperation do
 
   # ---------------------
   # Sync operations
-  def store_file(filename, file_path) do
-    GenServer.call(__MODULE__, {:submit_store, filename, file_path}, @default_timeout)
+  def store_file(filename, file_path, opts \\ []) do
+    GenServer.call(__MODULE__, {:submit_store, filename, file_path, opts}, @default_timeout)
   end
 
   def retrieve_file(filename) do
@@ -50,14 +50,15 @@ defmodule MiniHadoop.Master.FileOperation do
   end
 
   @impl true
-  def handle_call({:submit_store, filename, file_path}, _from, state) do
+  @impl true
+  def handle_call({:submit_store, filename, file_path, opts}, _from, state) do
     cond do
       !File.exists?(file_path) ->
         {:reply, {:error, "File not found"}, state}
       MasterNode.filename_exists(filename) ->
         {:reply, {:error, "Filename already in use"}, state}
       true ->
-        create_and_start_operation(:store, filename, file_path, state)
+        create_and_start_operation(:store, filename, file_path, state, opts)
     end
   end
 
@@ -86,14 +87,16 @@ defmodule MiniHadoop.Master.FileOperation do
   end
 
   # Operation Creation Helper
-  defp create_and_start_operation(type, filename, file_path, state) do
+  # Operation Creation Helper
+  defp create_and_start_operation(type, filename, file_path, state, opts \\ []) do
     operation_id = "#{type}_#{state.next_id}"
 
     task = FileTask.new(%{
       id: operation_id,
       type: type,
       filename: filename,
-      file_path: file_path
+      file_path: file_path,
+      opts: opts
     })
     |> FileTask.mark_started("Initializing #{type} operation")
 
@@ -153,8 +156,37 @@ defmodule MiniHadoop.Master.FileOperation do
     # Send initial state update via helper
     update_operation(task)
 
+    split_on_newline = Keyword.get(task.opts, :split_on_newline, false)
+
+    stream =
+      if split_on_newline do
+        File.stream!(task.file_path, [:read])
+        |> Stream.chunk_while(
+          {[], 0},
+          fn line, {acc, current_size} ->
+            line_size = byte_size(line)
+            new_size = current_size + line_size
+
+            if new_size > block_size and current_size > 0 do
+              # Current chunk is full, emit it and start new chunk with current line
+              chunk_bin = IO.iodata_to_binary(Enum.reverse(acc))
+              {:cont, chunk_bin, {[line], line_size}}
+            else
+              # Add line to current chunk
+              {:cont, {[line | acc], new_size}}
+            end
+          end,
+          fn
+            {[], _} -> {:cont, []}
+            {acc, _} -> {:cont, IO.iodata_to_binary(Enum.reverse(acc)), []}
+          end
+        )
+      else
+        File.stream!(task.file_path, block_size, [:read, :binary])
+      end
+
     result =
-      File.stream!(task.file_path, block_size, [:read, :binary])
+      stream
       |> Stream.with_index()
       |> Stream.chunk_every(@batch_size)
       |> Enum.reduce_while({:ok, [], 0}, fn chunk, {status, acc_blocks, processed_count} ->

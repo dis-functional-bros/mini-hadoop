@@ -3,8 +3,8 @@ defmodule MiniHadoop do
   alias MiniHadoop.Master.ComputeOperation
   alias MiniHadoop.Models.JobSpec
 
-  def store_file(filename, file_path) when is_binary(filename) and is_binary(file_path) do
-    FileOperation.store_file(filename, file_path)
+  def store_file(filename, file_path, opts \\ []) when is_binary(filename) and is_binary(file_path) do
+    FileOperation.store_file(filename, file_path, opts)
   end
 
   def retrieve_file(filename) when is_binary(filename) do

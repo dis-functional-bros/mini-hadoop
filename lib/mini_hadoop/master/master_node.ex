@@ -250,118 +250,70 @@ defmodule MiniHadoop.Master.MasterNode do
   # implementation for re-replication of blocks
   @impl true
   def handle_info({:DOWN, _ref, :process, worker_pid, _reason}, state) do
-
     Logger.warning("Worker #{inspect(worker_pid)} went down, starting re-replication process")
 
-    # Get all blocks that were stored on the failed worker
+    # 1. Identify lost blocks
     block_ids = Map.get(state.worker_to_block_mapping, worker_pid, %{}) |> Map.keys()
 
-    # for every under-replicated block
-    replication_results =
-      Task.async_stream(block_ids, fn block_id ->
-        # Get current workers that have this block (excluding the dead one)
-        current_replicas = Map.get(state.block_to_worker_mapping, block_id, [])
-                          |> List.delete(worker_pid)
+    # 2. Clean up state IMMEDIATELY (remove dead worker)
+    # Remove from workers
+    {hostname, _info} = Enum.find(state.workers, {nil, nil}, fn {_h, i} -> i.pid == worker_pid end)
+    new_workers = if hostname, do: Map.delete(state.workers, hostname), else: state.workers
 
-        cond do
-          # No replicas left
-          length(current_replicas) == 0 ->
-            Logger.error("Block #{block_id} has NO remaining replicas - DATA LOST")
-            {:error, :no_replicas, block_id}
+    # Remove from worker_to_block_mapping
+    new_worker_to_block_mapping = Map.delete(state.worker_to_block_mapping, worker_pid)
 
-          # Still have replicas
-          true ->
-            # Exclude current replicas AND the dead worker from being selected as target
-            exclusion_list = [worker_pid | current_replicas]
-            
-            case find_smallest_excluding(state.tree, exclusion_list) do
-              {:ok, {_count, target_worker_pid}, _hostname} ->
-
-                source_worker_pid = hd(current_replicas)
-
-                case replicate_block_between_workers(source_worker_pid, target_worker_pid, block_id) do
-                  :ok ->
-                    {:ok, block_id, target_worker_pid}
-                  {:error, reason} ->
-                    Logger.error("Failed to re-replicate block #{block_id}: #{inspect(reason)}")
-                    {:error, reason, block_id}
-                end
-
-              :not_found ->
-                Logger.warning("No available worker to re-replicate block #{block_id}")
-                {:error, :no_target_worker, block_id}
-            end
-        end
-      end,
-      max_concurrency: 5,
-      timeout: 30_000
-      )
-      |> Enum.to_list()
-
-    # Update block_to_worker_mapping
+    # Remove from block_to_worker_mapping
     new_block_to_worker_mapping =
-      Enum.reduce(replication_results, state.block_to_worker_mapping, fn result, acc ->
-        case result do
-          {:ok, {:ok, block_id, new_worker_pid}} ->
-            Map.update(acc, block_id, [new_worker_pid], fn existing ->
-              existing
-              |> List.delete(worker_pid)
-              |> Kernel.++([new_worker_pid])
-              |> Enum.uniq()
-            end)
-
-          {:ok, {:error, _reason, block_id}} ->
-            Map.update(acc, block_id, [], fn existing ->
-              List.delete(existing, worker_pid)
-            end)
-
-          _ ->
-            acc
-        end
-      end)
-      |> Enum.reject(fn {_block_id, workers} -> workers == [] end)
-      |> Map.new()
-
-    # Build map of how many blocks each worker received: %{worker_pid => count}
-    worker_block_counts =
-      Enum.reduce(replication_results, %{}, fn result, acc ->
-        case result do
-          {:ok, {:ok, _block_id, target_pid}} -> Map.update(acc, target_pid, 1, &(&1 + 1))
-          _ -> acc
-        end
+      Enum.reduce(block_ids, state.block_to_worker_mapping, fn block_id, acc ->
+        Map.update(acc, block_id, [], &List.delete(&1, worker_pid))
       end)
 
-    # remove dead worker and update blocks_count for workers that received blocks
-    new_workers =
-      state.workers
-      |> Enum.reject(fn {_hostname, info} -> info.pid == worker_pid end)
-      |> Enum.map(fn {hostname, info} ->
-        added_count = Map.get(worker_block_counts, info.pid, 0)
-        {hostname, %{info | blocks_count: info.blocks_count + added_count}}
-      end)
-      |> Map.new()
-
-    if map_size(new_workers) < map_size(state.workers) do
-      Logger.info("Removed worker #{inspect(worker_pid)} from workers list.")
-    else
-      Logger.warning("Worker #{inspect(worker_pid)} not found in workers list during DOWN handling.")
-    end
-
-    # Update worker_to_block_mapping: remove dead worker, add blocks to targets
-    new_worker_to_block_mapping =
-      state.worker_to_block_mapping
-      |> Map.delete(worker_pid)
-      |> then(fn mapping ->
-        Enum.reduce(replication_results, mapping, fn result, acc ->
-          case result do
-            {:ok, {:ok, block_id, target_pid}} ->
-              Map.update(acc, target_pid, %{block_id => true}, &Map.put(&1, block_id, true))
-            _ -> acc
-          end
-        end)
-      end)
-
+    # Rebuild tree without dead worker
     new_tree = rebuild_tree(new_workers)
+
+    # Snapshot for the task
+    # We need the *updated* block_to_worker_mapping to find *other* sources (dead one is gone)
+    mapping_snapshot = new_block_to_worker_mapping
+
+    # 3. Start Async Re-replication
+    if length(block_ids) > 0 do
+      Task.start(fn ->
+        Logger.info("Starting re-replication for #{length(block_ids)} blocks")
+
+        block_ids
+        |> Task.async_stream(fn block_id ->
+          # Find potential sources (using snapshot)
+          current_workers = Map.get(mapping_snapshot, block_id, [])
+
+          if current_workers == [] do
+            Logger.error("Block #{block_id} has NO remaining replicas - DATA LOST")
+            {:error, :data_lost}
+          else
+            source_pid = hd(current_workers)
+
+            # Find target (this calls Master, which is now free)
+            case __MODULE__.pop_smallest(block_id) do
+              {:ok, target_pid} ->
+                 case replicate_block_between_workers(source_pid, target_pid, block_id) do
+                   {:ok, {:store, updated_worker_state}} ->
+                     # Update tree incrementally
+                     __MODULE__.update_tree({:store, updated_worker_state})
+                     Logger.info("Re-replicated block #{block_id} to #{inspect(target_pid)}")
+                     :ok
+                   error ->
+                     Logger.error("Failed to replicate block #{block_id}: #{inspect(error)}")
+                     error
+                 end
+              {:error, reason} ->
+                 Logger.warning("Could not find target for block #{block_id}: #{inspect(reason)}")
+                 {:error, reason}
+            end
+          end
+        end, max_concurrency: 1, timeout: :infinity)
+        |> Stream.run()
+      end)
+    end
 
     new_state = %{state |
       workers: new_workers,
@@ -379,8 +331,8 @@ defmodule MiniHadoop.Master.MasterNode do
       case GenServer.call(source_pid, {:retrieve_block, block_id}, 30_000) do
         {:ok, block_data} ->
           case GenServer.call(target_pid, {:store_block, block_id, block_data}, 30_000) do
-            {:store, _worker_state} ->
-              :ok
+            {:store, worker_state} ->
+              {:ok, {:store, worker_state}}
             other ->
               {:error, {:unexpected_store_response, other}}
           end

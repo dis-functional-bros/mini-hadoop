@@ -8,6 +8,7 @@ defmodule MiniHadoop.Models.FileTask do
     :type,       # :store, :read, :delete
     :filename,
     :file_path,
+    :opts,
     :status,        # :pending, :running, :completed, :failed
     :progress,     # 0-100
     :error_reason,
@@ -21,6 +22,7 @@ defmodule MiniHadoop.Models.FileTask do
   ]
 
   @default_attrs %{
+    opts: [],
     status: :pending,
     progress: 0,
     blocks_processed: 0,
