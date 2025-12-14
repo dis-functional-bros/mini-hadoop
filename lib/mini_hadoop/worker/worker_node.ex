@@ -107,29 +107,29 @@ defmodule MiniHadoop.Worker.WorkerNode do
   end
 
   @impl true
-  def handle_call({:replicate_block_from, block_id, source_pid}, _from, state) do
-    # 1. Fetch data directly from source worker
-    case GenServer.call(source_pid, {:retrieve_block, block_id}, 30_000) do
-      {:ok, block_data} ->
-        # 2. Store locally (reuse logic)
-        file_path = Path.join(state.path, block_id)
-        File.write!(file_path, block_data)
 
-        new_blocks = Map.put(state.blocks, block_id, true)
-        new_blocks_count = state.blocks_count + 1
-        new_state = %{state | blocks: new_blocks, blocks_count: new_blocks_count, running_task: nil}
+  def handle_call({:replicate_block_from, block_id, source_pid}, from, state) do
+    # Spawn a task to do the work asynchronously so we don't block the GenServer loop
+    # This prevents deadlock when two workers try to replicate from each other simultaneously
+    Task.start(fn ->
+      result =
+        # 1. Fetch data directly from source worker
+        case GenServer.call(source_pid, {:retrieve_block, block_id}, 30_000) do
+          {:ok, block_data} ->
+            {:ok, block_data}
 
-        result = trim_send_state(new_state)
-        result = Map.put(result, :changed_block, block_id)
+          {:error, reason} ->
+            {:error, reason}
 
-        {:reply, {:store, result}, new_state}
+          other ->
+            {:error, {:unexpected_response, other}}
+        end
 
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+      # Send result back to the worker process to update state safely
+      send(state.pid, {:replication_result, from, block_id, result})
+    end)
 
-      other ->
-        {:reply, {:error, {:unexpected_response, other}}, state}
-    end
+    {:noreply, state}
   end
 
   @impl true
@@ -139,6 +139,32 @@ defmodule MiniHadoop.Worker.WorkerNode do
   end
 
   # ========== handle_info functions (grouped together) ==========
+
+  @impl true
+  def handle_info({:replication_result, from, block_id, result}, state) do
+    case result do
+      {:ok, block_data} ->
+        # 2. Store locally (reuse logic)
+        file_path = Path.join(state.path, block_id)
+        File.write!(file_path, block_data)
+
+        new_blocks = Map.put(state.blocks, block_id, true)
+        new_blocks_count = state.blocks_count + 1
+        new_state = %{state | blocks: new_blocks, blocks_count: new_blocks_count, running_task: nil}
+
+        result_payload = trim_send_state(new_state)
+        result_payload = Map.put(result_payload, :changed_block, block_id)
+
+        GenServer.reply(from, {:store, result_payload})
+        {:noreply, new_state}
+
+      {:error, reason} ->
+        GenServer.reply(from, {:error, reason})
+        {:noreply, state}
+    end
+  end
+
+
 
   @impl true
   def handle_info(:register_master, %{registration_attempts: attempts} = state)
