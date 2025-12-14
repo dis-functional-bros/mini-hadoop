@@ -107,6 +107,32 @@ defmodule MiniHadoop.Worker.WorkerNode do
   end
 
   @impl true
+  def handle_call({:replicate_block_from, block_id, source_pid}, _from, state) do
+    # 1. Fetch data directly from source worker
+    case GenServer.call(source_pid, {:retrieve_block, block_id}, 30_000) do
+      {:ok, block_data} ->
+        # 2. Store locally (reuse logic)
+        file_path = Path.join(state.path, block_id)
+        File.write!(file_path, block_data)
+
+        new_blocks = Map.put(state.blocks, block_id, true)
+        new_blocks_count = state.blocks_count + 1
+        new_state = %{state | blocks: new_blocks, blocks_count: new_blocks_count, running_task: nil}
+
+        result = trim_send_state(new_state)
+        result = Map.put(result, :changed_block, block_id)
+
+        {:reply, {:store, result}, new_state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+
+      other ->
+        {:reply, {:error, {:unexpected_response, other}}, state}
+    end
+  end
+
+  @impl true
   def handle_call({:get_worker_state}, _from, state) do
     result = trim_send_state(state)
     {:reply, {:ok, result}, state}

@@ -310,7 +310,7 @@ defmodule MiniHadoop.Master.MasterNode do
                  {:error, reason}
             end
           end
-        end, max_concurrency: 1, timeout: :infinity)
+        end, max_concurrency: 100, timeout: 300_000)
         |> Stream.run()
       end)
     end
@@ -328,20 +328,16 @@ defmodule MiniHadoop.Master.MasterNode do
   # Helper function to replicate a block from source worker to target worker
   defp replicate_block_between_workers(source_pid, target_pid, block_id) do
     try do
-      case GenServer.call(source_pid, {:retrieve_block, block_id}, 30_000) do
-        {:ok, block_data} ->
-          case GenServer.call(target_pid, {:store_block, block_id, block_data}, 30_000) do
-            {:store, worker_state} ->
-              {:ok, {:store, worker_state}}
-            other ->
-              {:error, {:unexpected_store_response, other}}
-          end
+
+      case GenServer.call(target_pid, {:replicate_block_from, block_id, source_pid}, 60_000) do
+        {:store, worker_state} ->
+          {:ok, {:store, worker_state}}
 
         {:error, reason} ->
-          {:error, {:retrieve_failed, reason}}
+          {:error, {:replication_failed, reason}}
 
         other ->
-          {:error, {:unexpected_retrieve_response, other}}
+          {:error, {:unexpected_replication_response, other}}
       end
     rescue
       error -> {:error, {:exception, error}}
